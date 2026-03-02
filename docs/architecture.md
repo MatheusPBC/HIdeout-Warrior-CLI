@@ -24,45 +24,58 @@ O sistema opera de maneira **estrita e sob demanda**, garantindo conformidade to
 
 O arquivo principal de entrada do sistema. Utiliza a biblioteca `Typer` para expor os comandos de forma organizada e elegante no terminal. Ele orquestra e inicializa as injeções de dependência para os 4 módulos *Core*.
 
-### 2. `core/api_integrator.py` (Módulo A - Hospital de Itens)
+### 2. `core/models.py` (Módulo Central de Contratos de Dados)
+
+**Função:** Garantia de Estrita Tipagem de Estado para o Motor de Busca e Crafting.
+
+* Utiliza **Pydantic** (`CraftingTargetSchema`, `AffixTarget`) para estruturar de forma escalável os filtros JSON que refletem o desejo do usuário.
+* Cada Afixo recebe identificadores diretos do Path of Exile Trade (ex: `pseudo.pseudo_total_mana`), flags de Fraturado e Constraints rigorosas (limite de *Divines* para o craft, exigência de Prefixos/Sufixos vazios no final).
+
+### 3. `core/api_integrator.py` (Módulo A - Hospital de Itens)
 
 **Função:** Motor centralizado para se comunicar com as APIs da GGG.
-* Responsável por montar e gerenciar os payloads JSON para a `Trade API`.
-* Contém a lógica de restrição absoluta de Rate-Limit exigida pela GGG.
-* Filtra, busca e realiza o *fetch* de metadados dos itens listados (ex: buscando itens *bricked* que podem ser salvos com processos base-deterministicos como Eldritch Annuls).
 
-### 3. `core/broker.py` (Módulo A - The Broker)
+* Utiliza a classe `GGGTradeAPI` mapeando de forma genuína para `https://www.pathofexile.com/api/trade`.
+* Monta e gerencia os payloads JSON (`search_items`) extraídos do `core/models.py`.
+* **Prevenção de BAN:** Possui um algoritmo de *Rate Limit Handling* rigoroso (`_handle_rate_limits`) que lê os headers HTTP do Cloudflare da GGG. Ao tomar HTTP 429, ele induz um `time.sleep()` forçado pelo valor lido na flag `Retry-After`.
+* Realiza o GET (`fetch_item_details`) respeitando o hard limit de no máximo 10 itens por lote.
+
+### 4. `core/broker.py` (Módulo A - The Broker)
 
 **Função:** Assistente veloz para transações de mercado.
-* Roda após a validação do *API Integrator*.
-* Formata a string exata do whisper de compra do Path of Exile.
-* Injeta o texto no clipboard (área de transferência) do Sistema Operacional, permitindo que o usuário apenas de um `Alt+Tab` e `Ctrl+V` dentro do jogo de forma segura.
 
-### 4. `core/graph_engine.py` (Módulo B - Motor de Grafos A*)
+* Roda após a validação do *API Integrator*.
+* Com base nas matrizes e hashes retornados da API oficial, formata a string exata do whisper de compra do Path of Exile (ex: `@Player Hi, I would like to buy your Tabula Rasa...`).
+* Injeta o texto no clipboard (área de transferência) do Sistema Operacional via `pyperclip`, permitindo que o usuário apenas de um `Alt+Tab` e `Ctrl+V` dentro do jogo de forma segura.
+
+### 5. `core/graph_engine.py` (Módulo B - Motor de Grafos A*)
 
 **Função:** Engrahar o crafting de itens.
+
 * Transforma os métodos de craft em "Grafos Direcionados".
 * Utiliza `networkx` e a heurística de busca A* (A-Star) para calcular rotas.
-* O *edge_weight* da busca é o EV (Expected Value) ou "Custo" em Divines/Chaos daquela ação.
-* Ele encontra a rota ótima estritamente matemática ignorando viés emocional (ex: Alteration Spam vs Fossil Crafting).
+* O *edge_weight* da busca é o EV (Expected Value) ou "Custo" em Divines/Chaos daquela ação lida pelo Módulo C.
 
-### 5. `core/recombinators.py` (Módulo B - Engine Recombinator)
+### 6. `core/recombinators.py` (Módulo B - Engine Recombinator)
 
 **Função:** Engine de modelagem de probabilidade da Sentinel/Settlers re-introduced core.
+
 * O craft de recombinators depende de "pools" colidindo (Sufixos vs Sufixos).
-* Utiliza a biblioteca `numpy` para prever a probabilidade estatística teórica do afixo sobreviver na nova base, evitando que o usuário desperdice recursos se os nós de probabilidade do pool exclusivo (ou pool duplicado) não forem favoráveis contra a entropia da fusão.
-* Disputa o EV do *GraphEngine* para sugerir se comprar duas bases lixo e combinar é estatisticamente mais barato.
+* Utiliza matrizes do `numpy` para prever a probabilidade estatística teórica baseada nativamente nas regras de Retenção de Slots (Pool Size de 1 a 6 mods).
+* Processa afixos Únicos vs. afixos Compartilhados utilizando cálculo hipergeométrico.
 
-### 6. `core/meta_sync.py` (Módulo C - Poe.Ninja Scraper)
+### 7. `core/meta_sync.py` (Módulo C - Poe.Ninja Scraper)
 
-**Função:** Alinhamento estratégico ao Meta do Jogo.
-* Sincroniza dados consumindo o web-end do poe.ninja.
-* O objetivo é não depender de heurísticas cegas. O robô raspa as Top Skills que estão sendo usadas na ladder e traduz isso pra "pesos" gerando um `current_meta_weights.json` local.
-* Esses dados direcionarão a mira do **Módulo A** (Se Lightning Strike for o meta, o módulo de Trade focará bases que escalam Flat Lightning/Attack Speed).
+**Função:** Alinhamento estratégico ao Mercado Real.
+
+* Sincroniza dados consumindo o web-end do `poe.ninja` para *Currency*, *Essences* e *Fossils*.
+* Emprega um mecanismo de Defesa/Cache (`data/market_prices.json`) de 1-Hora para evitar onerar os servidores de terceiros.
+* Fornece Complexidade O(1) de acesso real a Economy via função `get_price("Item Name")`.
 
 ### 7. `core/rog_oracle.py` (Módulo D - O Oráculo do Rog)
 
 **Função:** Daemon Background de suporte live in-game.
+
 * Fica monitorando a área de transferência do usuário iterativamente usando `pyperclip`.
 * O jogador entra na interface de Expedição do NPC "Rog" e dá `Ctrl+C` no item apresentado.
 * O Daemon intercepta o "Item String Block" do PoE, realiza o parse do ilvl, keywords (Tier, fractured, implicit) e lança no prompt se aquele item vale a pena receber investimento ou se é *Skip/Reroll*.
