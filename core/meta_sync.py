@@ -1,69 +1,118 @@
-import requests
+import os
 import json
-from typing import Dict, List
+import time
+import requests
+from typing import Dict
 
 class PoeNinjaScraper:
     """
     Módulo C: Meta-Sync.
-    Integração com a API do poe.ninja para elencar as skills, classes 
-    e afixos principais sendo usados no topo da liga atual (Mirage).
+    Integração com a API do poe.ninja para elencar a economia atual da liga,
+    provendo O(1) reads do cache local de tempo de vida 1-Hora para a motor de pathfinding.
     """
+
+    CACHE_FILE = "data/market_prices.json"
+    CACHE_EXPIRATION_SECONDS = 3600 # 1 Hora
 
     def __init__(self, league: str = "Mirage"):
         self.league = league
-        self.base_url = "https://poe.ninja/api/data"
         self.headers = {
-            "User-Agent": "HideoutWarrior-CLI/1.0"
+            "User-Agent": "HideoutWarrior-CLI/1.0",
+            "Accept": "application/json"
         }
+        
+    def _is_cache_valid(self) -> bool:
+        """Verifica se o arquivo de cache existe e tem menos de 1 hora de vida."""
+        if not os.path.exists(self.CACHE_FILE):
+            return False
+            
+        file_mtime = os.path.getmtime(self.CACHE_FILE)
+        current_time = time.time()
+        
+        return (current_time - file_mtime) < self.CACHE_EXPIRATION_SECONDS
 
-    def fetch_top_skills(self) -> List[Dict]:
+    def _fetch_endpoint(self, url: str, is_currency: bool = False) -> Dict[str, float]:
         """
-        Faz um fetch do meta atual (builds level alto) para descobrir
-        as skills primárias mais utilizadas.
-        (Nesse mock apontamos pra um endpoint fictício do poe.ninja de ladder)
+        Faz o GET para um endpoint do poe.ninja e extrai o nome do item 
+        e seu valor equivalente em Chaos.
         """
+        prices = {}
         try:
-            # Em Path of Exile, as stats de build do poe.ninja geralmente vêm do build endpoint
-            # Ex: https://poe.ninja/api/data/getbuildoverview?overview=mirage&type=exp&language=en
-            url = f"{self.base_url}/getbuildoverview?overview={self.league.lower()}&type=exp&language=en"
-            
-            # NOTE: O poe.ninja frequentemente muda suas rotas não-oficiais de dados de builds.
-            # Este é um esqueleto da Request.
             response = requests.get(url, headers=self.headers, timeout=10)
-            
             if response.status_code == 200:
                 data = response.json()
-                return data.get("skills", [])
+                lines = data.get("lines", [])
+                
+                for item in lines:
+                    if is_currency:
+                        name = item.get("currencyTypeName")
+                        # Em currency, chaos equivalent vem direto em receive/pay ou chaosEquivalent
+                        price = item.get("chaosEquivalent", 0.0) 
+                    else:
+                        name = item.get("name")
+                        price = item.get("chaosValue", 0.0)
+                        
+                    if name and price > 0:
+                        prices[name] = float(price)
             else:
-                return []
+                print(f"[META-SYNC] Falha HTTP {response.status_code} na URL: {url}")
+                
         except Exception as e:
-            print(f"[META-SYNC] Erro de requisição no poe.ninja: {e}")
-            return []
+            print(f"[META-SYNC] Erro consultando poe.ninja: {e}")
+            
+        return prices
 
-    def mock_meta_weights(self) -> Dict[str, float]:
+    def sync_market_data(self) -> bool:
         """
-        Simulação do motor dinâmico de pesos para a POC:
-        Se a request falhar (devido a endpoints dinâmicos na web), isso prova 
-        que a CLI sabe o que fazer com os dados. Retorna um json de pesos.
+        Sincroniza Currency, Essences e Fossils do poe.ninja.
+        Se o cache for válido, skipa a Request. Senão, recarrega e salva no cache JSON.
         """
-        return {
-            "adds_#_to_#_physical_damage": 8.5,
-            "adds_#_to_#_lightning_damage": 9.2,  # Exemplo: meta de LS (Lightning Strike)
-            "#%_increased_attack_speed": 7.0,
-            "+#_to_maximum_life": 5.0,
-            "#%_to_chaos_resistance": 6.5
-        }
-    
-    def sync_weights_to_file(self, filepath: str = "current_meta_weights.json"):
-        """
-        Processa as top builds, filtra os afixos, converte em pesos (0.0 - 10.0) 
-        e os defere em disco para serem lidos pelo Módulo A.
-        """
-        weights = self.mock_meta_weights()
+        if self._is_cache_valid():
+            print("[META-SYNC] Cache local está atualizado (< 1 hora). Sincronização pulada.")
+            return True
+            
+        print("[META-SYNC] Cache expirado ou não encontrado. Baixando dados do mercado (poe.ninja)...")
         
+        # Endpoints
+        currency_url = f"https://poe.ninja/api/data/currencyoverview?league={self.league}&type=Currency"
+        essence_url = f"https://poe.ninja/api/data/itemoverview?league={self.league}&type=Essence"
+        fossil_url = f"https://poe.ninja/api/data/itemoverview?league={self.league}&type=Fossil"
+        
+        consolidated_market: Dict[str, float] = {}
+        
+        # Faz os fetches
+        currency_data = self._fetch_endpoint(currency_url, is_currency=True)
+        essence_data = self._fetch_endpoint(essence_url, is_currency=False)
+        fossil_data = self._fetch_endpoint(fossil_url, is_currency=False)
+        
+        # Merges dicts via update()
+        consolidated_market.update(currency_data)
+        consolidated_market.update(essence_data)
+        consolidated_market.update(fossil_data)
+        
+        # Salva em Disco
         try:
-            with open(filepath, 'w') as f:
-                json.dump(weights, f, indent=4)
-            return True, filepath
-        except IOError:
-            return False, ""
+            os.makedirs(os.path.dirname(self.CACHE_FILE), exist_ok=True)
+            with open(self.CACHE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(consolidated_market, f, indent=4)
+            print(f"[META-SYNC] Sucesso! Foram salvos {len(consolidated_market)} itens em {self.CACHE_FILE}.")
+            return True
+        except IOError as e:
+            print(f"[META-SYNC] Erro escrevendo cache no disco: {e}")
+            return False
+
+def get_price(item_name: str) -> float:
+    """
+    Função pública global Helper (Complexidade O(1)) 
+    para leitura ágil do cache por outras classes da aplicação.
+    """
+    cache_path = PoeNinjaScraper.CACHE_FILE
+    if not os.path.exists(cache_path):
+        return 0.0
+        
+    try:
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get(item_name, 0.0)
+    except Exception:
+        return 0.0
