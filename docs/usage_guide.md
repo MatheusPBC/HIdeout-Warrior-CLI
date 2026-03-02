@@ -53,7 +53,7 @@ python cli.py craft-path --target my_dream_item.json --allow-recombinators
 
 **Comando:** `python cli.py meta-sync`
 
-**Descrição:** Sincronização essencial que deve ser rodada de tempo em tempo. Ela aciona o Scraper do `poe.ninja` para pegar estatísticas on-the-fly de quais habilidades e mods estão liderando o servidor de Experiência e constrói dinamicamente um arquivo `current_meta_weights.json`. Seus bots de Sniping (Comando 1) irão obedecer o que esse Json achar mais relevante.
+**Descrição:** Sincronização vital da Economia que deve ser rodada de tempo em tempo. Ela aciona o Scraper do `poe.ninja` para fazer fetch de todos os itens do mercado (Currency, Essences e Fossils) e converte seus valores para **Chaos Equivalent**. O download possui uma defesa de Rate Limiting por Cache Local que expira em 1-Hora, armazenando os resultados silenciosamente em `data/market_prices.json` para que os calculos probabilísticos Módulo B e de arbitragem do Módulo A leiam isso em complexidade O(1).
 
 **Exemplo de Uso:**
 
