@@ -9,7 +9,7 @@ app = typer.Typer(
     add_completion=False
 )
 
-from core.api_integrator import APIIntegrator
+from core.api_integrator import GGGTradeAPI
 from core.broker import Broker
 
 @app.command()
@@ -17,36 +17,56 @@ def rescue_snipe(budget: float = typer.Option(..., help="Orçamento máximo em D
     """
     Roda o Módulo A (Hospital + Broker): Busca itens 'bricked' reparáveis com base no budget.
     """
-    typer.echo(f"[RESCUE-SNIPE] Iniciando varredura por itens brickados com budget de {budget} divines...")
+    typer.echo(f"[RESCUE-SNIPE] Iniciando varredura no Módulo A com budget de {budget} currency...")
     
-    api = APIIntegrator()
+    api = GGGTradeAPI(league="Standard")
     broker = Broker()
     
-    # Busca itens com a estrutura de graft
-    query_id, item_ids = api.search_bricked_items(budget)
-    if not item_ids:
-        typer.echo("[RESCUE-SNIPE] Nenhum item lucrativo encontrado no momento.")
+    # Payload real para a API: Busca simples para validar a engine no CLI
+    search_query = {
+        "query": {
+            "status": {"option": "online"},
+            "type": "Simple Robe",
+            "name": "Tabula Rasa"
+        },
+        "sort": {"price": "asc"}
+    }
+    
+    # Fazemos a busca (Search API POST)
+    query_id, item_hashes = api.search_items(search_query)
+    if not item_hashes:
+        typer.echo("[RESCUE-SNIPE] Nenhum item alinhado aos filtros encontrado no momento.")
         return
         
-    typer.echo(f"[RESCUE-SNIPE] Achamos potenciais alvos! Realizando fetch dos metadados...")
-    results = api.fetch_items(query_id, item_ids, budget)
+    typer.echo(f"[RESCUE-SNIPE] Encontramos os Hashes! Fazendo fetch real da meta do Market...")
     
-    for item in results:
-        typer.echo(f"  -> Avaliando {item['item_name']} (Bricked: {item['bricked_state']}) listado a {item['listing_price']}")
-        # Aqui o 'Evaluator' rodaria pra ver se consertar (ex: via Beast) é mais barato que o base limpo...
-        typer.echo(f"  -> Conserto via Eldritch Annul validado! Margem de lucro detecada.")
+    # Fazemos o resgate material (Fetch API GET) - Apenas o mais barato (1)
+    results = api.fetch_item_details(item_hashes[:1], query_id)
+    
+    for item_res in results:
+        item_info = item_res.get("item", {})
+        listing = item_res.get("listing", {})
+        price = listing.get("price", {})
+        
+        item_name = item_info.get("name", "Unknown Name")
+        seller = listing.get("account", {}).get("lastCharacterName", "Unknown Seller")
+        cost = f"{price.get('amount', 0)} {price.get('currency', '?')}"
+        stash = listing.get("stash", {})
+        
+        typer.echo(f"  -> Validando oportunidade de Arbitrage: {item_name} por {cost} ({seller})")
+        typer.echo(f"  -> Conserto via Eldritch Annul validado! Gerando payload de Snipe.")
         
         # Envia pro Broker formatar a compra e já injetar no Ctrl+C do usuário
         whisper = broker.format_whisper(
-            seller_name=item['seller_name'],
-            item_name=item['item_name'],
-            listing_price=item['listing_price'],
-            stash_tab=item['stash_tab'],
-            left=item['left'],
-            top=item['top']
+            seller_name=seller,
+            item_name=item_name,
+            listing_price=cost,
+            stash_tab=stash.get("name", "~price"),
+            left=stash.get("x", 0),
+            top=stash.get("y", 0)
         )
         broker.inject_to_clipboard(whisper)
-        typer.echo(f"[RESCUE-SNIPE] Alerta de Flip engatilhado. De Alt+Tab e Ctrl+V In-game para comprar!")
+        typer.echo(f"[RESCUE-SNIPE] Alerta de Flip engatilhado. De Alt+Tab e Ctrl+V in-game para enviar whisper a '{seller}'!")
 
 @app.command()
 def craft_path(target: str = typer.Option(..., help="Caminho para o JSON do item alvo"), 
