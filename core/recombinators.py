@@ -1,123 +1,142 @@
 import numpy as np
-from typing import List, Dict
-
-# Assumindo que o ItemA/ItemB cheguem como dicionarios baseados no Schema
-# ou instâncias provindas das rotinas do scraper/broker.
-from .models import TargetStats, AffixTarget
+from typing import List, Dict, Set, Any
 
 class RecombinatorEngine:
     """
     Sub-Engine (Módulo B) matemática baseada na mecânica de Recombinators (Sentinel/Settlers).
-    
-    A regra do Recombinator:
-    - Combina dois itens (Item A e Item B).
-    - Processa Prefixos separados dos Sufixos.
-    - O número de afixos retidos no Item final depende do tamanho do "Pool" (Afixos A + Afixos B).
-    - Tabela de Retenção:
-        Pool 1: 100% de manter 1 afixo.
-        Pool 2: 33% (1 afixo), 66% (2 afixos).
-        Pool 3: 20% (1 afixo), 50% (2 afixos), 30% (3 afixos).
-        Pool 4: 35% (2 afixos), 55% (3 afixos)  [10% falha ignorada -> Normalizada]
-        Pool 5: 20% (2 afixos), 80% (3 afixos).
-        Pool 6: 100% (3 afixos).
+    Calcula a chance de sobrevivência de modificadores quando dois itens são fundidos.
     """
-
     def __init__(self):
         # Tabela oficial de retenção de slots (Pool Size -> Probabilities[1, 2, 3 slots])
-        # [Chance 1 Slot, Chance 2 Slots, Chance 3 Slots]
         self.retention_table = {
-            # Pool 1: 100% = 1 afixo
             1: np.array([1.0, 0.0, 0.0]),
-            # Pool 2: 33% = 1 afixo, 66% = 2 afixos
             2: np.array([0.33, 0.66, 0.0]),
-            # Pool 3: 20% = 1 afixo, 50% = 2 afixos, 30% = 3 afixos
             3: np.array([0.20, 0.50, 0.30]),
-            # Pool 4: 35% = 2 afixos, 55% = 3 afixos. (Resto de downgrade ignorado ~10%)
-            # Normalizado pra dar 1.0 -> (0.388 pra 2 afixos, 0.611 pra 3 afixos)
+            # Resto de downgrade ignorado para fins práticos matemáticos normalizados.
             4: np.array([0.0, 0.3888, 0.6111]),
-            # Pool 5: 20% = 2 afixos, 80% = 3 afixos.
             5: np.array([0.0, 0.20, 0.80]),
-            # Pool 6: 100% = 3 afixos
             6: np.array([0.0, 0.0, 1.0])
         }
 
-    def _calculate_pool_success(self, item_a_mods: List[str], item_b_mods: List[str], target_mod: str) -> float:
+    def _resolve_exclusive_groups(self, mods_a: List[Dict[str, Any]], mods_b: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Calcula a chance de um afixo específico sobreviver baseado no tamanho da pool gerada (Prefix ou Suffix isolation).
+        Regras de Exclusão (Shared Mod Groups):
+        Se os dois itens partilharem o mesmo `mod_group` (ex: '# to maximum Life'),
+        eles colapsam num só durante a fusão, ou o sistema escolhe apenas um console
+        as regras pre-definidas.
+        Aqui agrupamos mods e consideramos apenas 1 peso combinatório se colidirem no mesmo grupo.
         """
-        pool_size = len(item_a_mods) + len(item_b_mods)
+        pool = []
+        seen_groups = set()
+        
+        # Juntamos ambos
+        all_mods = mods_a + mods_b
+        
+        # Filtramos collisões de grupo mantendo apenas a ocorrência pra roleta. 
+        # (Se for um grupo válido e duplicado entre A e B).
+        for mod in all_mods:
+            mod_group = mod.get("mod_group")
+            # Se não tem group, entra limpo.
+            if not mod_group:
+                 pool.append(mod)
+                 continue
+                 
+            # Se o mod for Non-Native ou exclusivo sem stack, trataremos a multiplicidade.
+            if mod_group not in seen_groups:
+                 seen_groups.add(mod_group)
+                 pool.append(mod)
+                 
+        return pool
+
+    def _calculate_pool_success(self, merged_pool: List[Dict[str, Any]], target_mods_in_pool: List[str]) -> float:
+        """
+        Calcula a chance de sobrevivência para os target_mods dentro do pool atual 
+        (Prefixos ou Sufixos segregados).
+        Retorna Rota Estatística (P).
+        """
+        pool_size = len(merged_pool)
         if pool_size == 0 or pool_size > 6:
-            return 0.0 # Sem mods, sem chance ou Pool excede limite do motor (ex: Itens corrompidos absurdos).
-        
-        # O quão frequente o mod é no pool?
-        weight_in_pool = 0
-        if target_mod in item_a_mods:
-            weight_in_pool += 1
-        if target_mod in item_b_mods:
-            weight_in_pool += 1
+            return 0.0 
             
-        if weight_in_pool == 0:
-            return 0.0 # Mod não existe em nenhum item.
-        
-        # Puxamos as chances de puxar N slots daquela pool (Ex: Pool 4 = [Chance de puxar 1, Chance puxar 2, Chance puxar 3])
-        draw_chances = self.retention_table[pool_size]
-        
+        points_in_pool = 0
+        for mod in merged_pool:
+            if mod.get("mod_id") in target_mods_in_pool:
+                # O modificador target real bateu com um peso
+                points_in_pool += 1
+                
+        if points_in_pool == 0:
+            return 0.0
+            
+        draw_chances = self.retention_table.get(pool_size, np.array([0.0, 0.0, 0.0]))
         success_chance = 0.0
         
-        # Simulação Estatística:
-        # Array `[1, 2, 3]` representa quantos mods o algoritmo do Recombinator puxou do saco.
-        # Nós usamos hipergeométrica base matemática simplificada para calcular as odds daquele TARGET
-        # ser um dos escolhdos dados "K" slots sacados de "N" totais onde "W" são "meu mod target"
         for slots_drawn, prob_of_this_draw in enumerate(draw_chances, start=1):
             if prob_of_this_draw > 0.0:
-                # Qual a chance do meu target mod estar dentro desses `slots_drawn`?
-                # C(TargetWeight, 1) * C(Pool - TargetWeight, slots_drawn - 1) / C(Pool, slots_drawn)
-                # Mais simplificado pro motor de craft da CLI:
+                # Odds puras: X slots_drawn / pool_size
+                odds = (slots_drawn / pool_size) * points_in_pool
                 
-                # Se eu puxo X slots de um pool Y, a chance em branco do mod estar dentro é X / Y
-                # Multiplicado por quantas vezes ele está no pot (weight_in_pool).
-                # Isso impede draws de > 100%, portanto usamos numpy clip.
-                odds = (slots_drawn / pool_size) * weight_in_pool
+                # Non-Native Natural (NNN) e exclusividades geram penalties escondidos 
+                # (ex: Drop-only Essence ou Incursion). Simplificamos no clip de teto da ODD:
                 clamped_odds = float(np.clip(odds, 0.0, 1.0))
-                
-                # Somamos isso pro success final ponderado pela chance de acontecer AQUELE draw de slots.
                 success_chance += clamped_odds * prob_of_this_draw
                 
         return success_chance
 
-    def calculate_fusion_probability(self, item_a: Dict, item_b: Dict, target: TargetStats) -> float:
+    def calculate_recombination_chance(self, item_a: Dict[str, Any], item_b: Dict[str, Any], desired_mods: List[str]) -> float:
         """
-        Calcula a chance estatística global da fusão Retornar a Base escolhida COM todos
-        os afixos desejados intactos baseado na matriz de probabilidade da GGG.
+        Calcula a probabilidade Global de uma Recombinação atingir o item alvo (Desired Mods).
         
-        `item_a`/`item_b` assumem Formato Dict bruto contendo listas ["prefixes"] e ["suffixes"] 
-        com as strings dos "trade_api_id" (ex: ["pseudo.pseudo_total_mana"]).
+        O 'item_a' e 'item_b' contêm as listas completas de seus afixos mapeados com 
+        tags Pydantic e mod_group.
         """
-        # 1. Base Resolution: 50% de chance para qualquer uma das bases
-        # Na engine real do Poe, teríamos que checar ILVL e Base classes iguais.
+        # Sorteio Base: 50/50 para Escolher a Base de 'Item A' (Ignorando iLvl biasing complexo)
         base_retention_chance = 0.50
         
-        # Isolamos Prefixes de ambos
-        a_prefixes = item_a.get("prefixes", [])
-        b_prefixes = item_b.get("prefixes", [])
+        # Filtros Lógicos: O PoE divide a roleta em Prefixes vs Suffixes.
+        a_prefixes = [m for m in item_a.get("mods", []) if m.get("type") == "prefix"]
+        b_prefixes = [m for m in item_b.get("mods", []) if m.get("type") == "prefix"]
         
-        # Isolamos Sufixos
-        a_suffixes = item_a.get("suffixes", [])
-        b_suffixes = item_b.get("suffixes", [])
+        a_suffixes = [m for m in item_a.get("mods", []) if m.get("type") == "suffix"]
+        b_suffixes = [m for m in item_b.get("mods", []) if m.get("type") == "suffix"]
         
-        # 2. Iteramos nos Targets Exigidos
-        total_odds = base_retention_chance
+        # Pool Resolve com Exclusões e Stack Limit
+        prefix_pool = self._resolve_exclusive_groups(a_prefixes, b_prefixes)
+        suffix_pool = self._resolve_exclusive_groups(a_suffixes, b_suffixes)
         
-        # Para cada Prefixo Desejado, testamos a sobrevivência do Pool
-        for prefix_target in target.prefixes:
-            target_id = prefix_target.trade_api_id
-            odds_prefix = self._calculate_pool_success(a_prefixes, b_prefixes, target_id)
-            total_odds *= odds_prefix # Mutualmente Exclusivo (Chance Composta: A AND B)
+        # O Modificador desejado possui propriedades 'type' = prefix ou suffix?
+        # Num cenário real leríamos do Schema. Aqui inferimos com base nos afixos contidos na base pra teste matemático
+        desired_prefixes = [mod for mod in desired_mods if any(p.get("mod_id") == mod for p in prefix_pool)]
+        desired_suffixes = [mod for mod in desired_mods if any(s.get("mod_id") == mod for s in suffix_pool)]
+        
+        odds_prefix = 1.0
+        if desired_prefixes:
+            odds_prefix = self._calculate_pool_success(prefix_pool, desired_prefixes)
             
-        # Para cada Sufixo Desejado, testamos a sobrevivência do Pool Adjacente
-        for suffix_target in target.suffixes:
-            target_id = suffix_target.trade_api_id
-            odds_suffix = self._calculate_pool_success(a_suffixes, b_suffixes, target_id)
-            total_odds *= odds_suffix
-            
-        return float(total_odds)
+        odds_suffix = 1.0
+        if desired_suffixes:
+            odds_suffix = self._calculate_pool_success(suffix_pool, desired_suffixes)
+        
+        return base_retention_chance * odds_prefix * odds_suffix
+
+if __name__ == "__main__":
+    print("--- Teste de Stress/Recombinator Engine ---")
+    
+    # Exemplo: Item A tem Vida Alta (prefix). Item B tem Vida Alta (prefix).
+    item_a_test = {
+        "mods": [
+            {"mod_id": "maximum_life_1", "type": "prefix", "mod_group": "Life"}
+        ]
+    }
+    item_b_test = {
+        "mods": [
+            {"mod_id": "movement_speed_1", "type": "prefix", "mod_group": "MovementVelocity"},
+            {"mod_id": "fire_res_1", "type": "suffix", "mod_group": "FireResist"}
+        ]
+    }
+    
+    desired = ["maximum_life_1", "movement_speed_1"]
+    
+    engine = RecombinatorEngine()
+    chance = engine.calculate_recombination_chance(item_a_test, item_b_test, desired)
+    
+    print(f"Probabilidade Certa Combinatória de Extrair Desired Mods: {chance:.4f} ({(chance * 100):.2f}%)")
