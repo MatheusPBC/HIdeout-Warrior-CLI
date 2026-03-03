@@ -14,6 +14,8 @@ from core.evaluator import CraftingEvaluator
 from core.recombinators import RecombinatorEngine
 from core.graph_engine import CraftingGraphEngine, ItemState, CraftingAction
 from core.clipboard_watcher import ClipboardScanner
+from core.ml_oracle import PricePredictor, CraftingHeuristic
+from core.market_scanner import OnDemandScanner
 
 app = typer.Typer(
     help="Hideout Warrior - Path of Exile Trade & Deterministic Crafting CLI",
@@ -33,7 +35,12 @@ class HideoutDashboard:
         self.parser = RePoeParser()
         self.evaluator = CraftingEvaluator(self.parser)
         self.recombinators = RecombinatorEngine()
-        self.graph_engine = CraftingGraphEngine(self.market, self.evaluator, self.recombinators)
+        self.predictor = PricePredictor()
+        self.heuristic = CraftingHeuristic()
+        self.graph_engine = CraftingGraphEngine(
+            self.market, self.evaluator, self.recombinators, 
+            self.predictor, self.heuristic
+        )
         
         # UI State
         self.current_item: ItemState = None
@@ -135,6 +142,51 @@ def craft_path(
     except KeyboardInterrupt:
         scanner.stop()
         console.print("[dim]Encerrando Hideout Warrior...[/dim]")
+
+
+@app.command()
+def scan(
+    type: str = typer.Option("", help="Nome base do item (ex: 'Imbued Wand')"),
+    ilvl: int = typer.Option(1, help="Item Level mínimo"),
+    rarity: str = typer.Option("rare", help="Raridade do item (ex: rare, unique, normal)"),
+    max_items: int = typer.Option(30, help="Quantidade máxima de itens para avaliar na paginação")
+):
+    """
+    (Fase 7) Scanner de Arbitragem Sob Demanda. Interroga a API da GGG e o ML Oracle
+    em busca de lucros subvalorizados no mercado.
+    """
+    from rich.status import Status
+    scanner = OnDemandScanner(league="Standard")
+    
+    with Status("[bold cyan]Buscando itens na API da GGG e avaliando rentabilidade via XGBoost...[/]", spinner="dots") as status:
+        results = scanner.run_scan(item_class=type, ilvl_min=ilvl, rarity=rarity, max_items=max_items)
+        
+    if not results:
+        console.print("[yellow]Nenhuma listagem com buyout foi encontrada para esses filtros na liga atual.[/yellow]")
+        return
+        
+    table = Table(title=f"🤑 Oportunidades de Arbitragem (Total: {len(results)})", expand=True)
+    table.add_column("Item Base", style="cyan")
+    table.add_column("Preço (Chaos)", justify="right", style="red")
+    table.add_column("Valor ML (Chaos)", justify="right", style="magenta")
+    table.add_column("Lucro (Chaos)", justify="right", style="bold")
+    table.add_column("Comando Whisper", style="dim white")
+    
+    for r in results:
+        profit = r["profit"]
+        
+        # Colorir lucros altos
+        profit_style = "bold green" if profit > 50.0 else "yellow" if profit > 0 else "white"
+        
+        table.add_row(
+            r["base_type"],
+            f"{r['listed_price']:.1f}",
+            f"{r['ml_value']:.1f}",
+            f"[{profit_style}]{profit:.1f}[/]",
+            r["whisper"][:40] + "..." if len(r["whisper"]) > 40 else r["whisper"]
+        )
+        
+    console.print(table)
 
 
 # --- Legacy Commands Retidos por Compatibilidade ---
