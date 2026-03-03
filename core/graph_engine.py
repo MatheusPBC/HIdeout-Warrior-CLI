@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from core.api_integrator import MarketAPIClient
 from core.evaluator import CraftingEvaluator
 from core.recombinators import RecombinatorEngine
+from core.ml_oracle import PricePredictor, CraftingHeuristic
 
 @dataclass(frozen=True)
 class ItemState:
@@ -43,10 +44,12 @@ class CraftingGraphEngine:
     Algoritmo A-Star (A*) acoplado que encontra a rota matematicamente mais barata de craft
     considerando o "Expected Value" financeiro de cada passo x Probabilidade.
     """
-    def __init__(self, market_api: MarketAPIClient, evaluator: CraftingEvaluator, recombinator: RecombinatorEngine):
+    def __init__(self, market_api: MarketAPIClient, evaluator: CraftingEvaluator, recombinator: RecombinatorEngine, price_predictor: PricePredictor, heuristic: CraftingHeuristic):
         self.market_api = market_api
         self.evaluator = evaluator
         self.recombinator = recombinator
+        self.price_predictor = price_predictor
+        self.heuristic = heuristic
         
         # Preços de exemplo carregados via ninja cache. No mundo real chamamos self.market_api
         self.currency_cache = {
@@ -79,9 +82,19 @@ class CraftingGraphEngine:
         """
         current_mods = current_state.prefixes.union(current_state.suffixes)
         missing_mods = goal_mods - current_mods
+        
+        # Inteligência de Machine Learning (Poda baseada em Lucro Oculto):
+        # Se o item possui combinações que o mercado valoriza profundamente,
+        # Nós abatemos o custo artificial G para encorajar a IA a não ignorar este ramo
+        # acreditando cegamente num path linear ineficiente.
+        predicted_profit_value = self.price_predictor.predict_value(current_state)
+        
         # Heurística Submissiva: Acreditamos otimisticamente que os mods faltantes vão
         # custar pelo menos 5 Chaos Orbs cada num mundo perfeito onde hitamos 100%.
-        return len(missing_mods) * 5.0
+        base_estimation = len(missing_mods) * 5.0
+        
+        # Abatemos o lucro preditivo do custo restante, sem corromper a mecânica não-negativa.
+        return max(0.0, base_estimation - (predicted_profit_value * 0.05))
 
     def generate_neighbors(self, state: ItemState, target_mods: Set[str]) -> List[CraftingAction]:
         """
@@ -94,38 +107,39 @@ class CraftingGraphEngine:
         
         # Tentativa de Exalted Orb
         if state.open_prefixes > 0 or state.open_suffixes > 0:
-            for goal_mod in target_mods:
-                 if goal_mod not in current_mods:
-                     # Descobrimos o Probability Matrix pelo core Evaluator.
-                     action_p = self.evaluator.calculate_mod_chance(
-                          base_type=state.base_type,
-                          current_mods=current_mods,
-                          target_mod_id=goal_mod,
-                          action="Exalt"
-                     )
-                     if action_p > 0:
-                         ev = self._calculate_ev(self._get_price("Exalted Orb"), action_p)
-                         
-                         # Simula o novo estado
-                         new_prefixes = set(state.prefixes)
-                         new_suffixes = set(state.suffixes)
-                         # Ignorando Type pra demo, botamos no prefix ou sufix aberto aleatorio.
-                         if state.open_prefixes > 0:
-                             new_prefixes.add(goal_mod)
-                         else:
-                             new_suffixes.add(goal_mod)
-                             
-                         new_state = ItemState(
-                             base_type=state.base_type, 
-                             ilvl=state.ilvl, 
-                             prefixes=frozenset(new_prefixes), 
-                             suffixes=frozenset(new_suffixes)
+            if not self.heuristic.should_prune(state, "Slam Exalted Orb", target_mods):
+                for goal_mod in target_mods:
+                     if goal_mod not in current_mods:
+                         # Descobrimos o Probability Matrix pelo core Evaluator.
+                         action_p = self.evaluator.calculate_mod_chance(
+                              base_type=state.base_type,
+                              current_mods=current_mods,
+                              target_mod_id=goal_mod,
+                              action="Exalt"
                          )
-                         
-                         neighbors.append(CraftingAction("Slam Exalted Orb", new_state, ev, action_p))
+                         if action_p > 0:
+                             ev = self._calculate_ev(self._get_price("Exalted Orb"), action_p)
+                             
+                             # Simula o novo estado
+                             new_prefixes = set(state.prefixes)
+                             new_suffixes = set(state.suffixes)
+                             # Ignorando Type pra demo, botamos no prefix ou sufix aberto aleatorio.
+                             if state.open_prefixes > 0:
+                                 new_prefixes.add(goal_mod)
+                             else:
+                                 new_suffixes.add(goal_mod)
+                                 
+                             new_state = ItemState(
+                                 base_type=state.base_type, 
+                                 ilvl=state.ilvl, 
+                                 prefixes=frozenset(new_prefixes), 
+                                 suffixes=frozenset(new_suffixes)
+                             )
+                             
+                             neighbors.append(CraftingAction("Slam Exalted Orb", new_state, ev, action_p))
                          
         # Tentativa de Harvest Reforge Speed
-        if True: # Ignorando regra de block pra simplificação do Snippet A*
+        if not self.heuristic.should_prune(state, "Harvest Reforge", target_mods):
             for goal_mod in target_mods:
                 if goal_mod not in current_mods:
                     # Rola tudo. Ignorado Bench-Craft Protection aqui.
@@ -167,8 +181,16 @@ class CraftingGraphEngine:
                 continue # Pruning da arvore
                 
             # Verifica Objetivo: O item possui TODOS os targets estritos da busca JSON?
+            # E Avalia Alternativamente usando o Oráculo: Achamos um item "bom demais pra roletar" no meio do caminho?
             current_mods = current_state.prefixes.union(current_state.suffixes)
-            if goal_set.issubset(current_mods):
+            predicted_value = self.price_predictor.predict_value(current_state)
+            
+            # Condição Alternativa ROI: Se gastamos > 10c, e o item agora vale 3x mais que o gasto, param e vende!
+            roi_hit = (g_cost > 10.0 and predicted_value >= (g_cost * 3.0))
+            
+            if goal_set.issubset(current_mods) or roi_hit:
+                if roi_hit and not goal_set.issubset(current_mods):
+                    current_path.append(f"AI Oracle STOP: Sinergia valiosa detectada ({predicted_value}c) superando ROI de 3x.")
                 return current_path, g_cost
                 
             # Expande Nós
@@ -200,8 +222,10 @@ if __name__ == "__main__":
     evaluator = CraftingEvaluator(parser)
     market = MarketAPIClient()
     recombinators = RecombinatorEngine()
+    predictor = PricePredictor()
+    heuristic = CraftingHeuristic()
     
-    engine = CraftingGraphEngine(market, evaluator, recombinators)
+    engine = CraftingGraphEngine(market, evaluator, recombinators, predictor, heuristic)
     
     start = ItemState("Omen Wand", 84, frozenset([]), frozenset([]))
     goals = ["SpellDamage1"]
