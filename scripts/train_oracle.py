@@ -1,7 +1,8 @@
 import sys
 import os
 import time
-from typing import List, Dict
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Tuple, Any
 
 # Adicionar a raiz ao PYTHONPATH para os imports do core funcionarem localmente
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -15,16 +16,34 @@ from sklearn.metrics import mean_squared_error
 
 from core.api_integrator import MarketAPIClient
 from core.graph_engine import ItemState
+from core.meta_analyzer import LadderAnalyzer, MetaScores, calculate_meta_utility_score
 
-def parse_trade_item_to_features(item_data: dict, currency_rates: dict) -> dict:
+
+def parse_trade_item_to_features(
+    item_data: dict,
+    currency_rates: dict,
+    meta_scores: Optional[MetaScores] = None
+) -> Optional[dict]:
     """
     Recebe o JSON de um item gerado pela GGG Trade API e extrai as Features Vetorizadas
     esperadas pelo modelo de XGBoost.
+    
+    Args:
+        item_data: Raw item JSON from GGG Trade API
+        currency_rates: Currency conversion rates to chaos
+        meta_scores: Current meta scores for tag weight calculation
+        
+    Returns:
+        Dictionary of features or None if item should be filtered out
     """
     listing = item_data.get("listing", {})
     price_info = listing.get("price", {})
     currency = price_info.get("currency", "")
     amount = price_info.get("amount", 0.0)
+    
+    # Skip items without valid price
+    if not amount or amount <= 0:
+        return None
     
     # Conversão Universal de Divisas -> Chaos Orb baseada no poe.ninja
     price_chaos = amount
@@ -46,6 +65,10 @@ def parse_trade_item_to_features(item_data: dict, currency_rates: dict) -> dict:
     
     item = item_data.get("item", {})
     ilvl = item.get("ilvl", 1)
+    base_type = item.get("baseType", "")
+    
+    # Extract listing timestamp for stale filter
+    listed_at = listing.get("indexed", "")
     
     # Influência Lógica
     influences = item.get("influences", {})
@@ -55,34 +78,338 @@ def parse_trade_item_to_features(item_data: dict, currency_rates: dict) -> dict:
     
     # Parsing de Mods - Heurística Base para o Treino
     mods = item.get("explicitMods", [])
+    implicit_mods = item.get("implicitMods", [])
+    all_mods = mods + implicit_mods
+    
     tier_life = 0
     tier_speed = 0
+    tier_resist = 0
+    tier_crit = 0
     total_affixes = len(mods)
     
-    for mod in mods:
+    # Extract item tags for meta scoring
+    item_tags: List[str] = []
+    
+    for mod in all_mods:
         mod_lower = mod.lower()
+        
+        # Life tier detection
         if "maximum life" in mod_lower:
             tier_life = 1 if "to maximum" in mod_lower else 2
+            item_tags.append("life")
+        
+        # Speed tier detection
         if "speed" in mod_lower:
             tier_speed = 1 if "increased" in mod_lower else 2
-            
+            item_tags.append("speed")
+        
+        # Resistance detection
+        if "resistance" in mod_lower or "resist" in mod_lower:
+            tier_resist = 1
+            item_tags.append("resistance")
+        
+        # Crit detection
+        if "critical" in mod_lower or "crit" in mod_lower:
+            tier_crit = 1
+            item_tags.append("crit")
+        
+        # Elemental damage detection
+        if "fire" in mod_lower or "adds.*fire" in mod_lower:
+            item_tags.append("fire")
+        if "cold" in mod_lower or "adds.*cold" in mod_lower:
+            item_tags.append("cold")
+        if "lightning" in mod_lower or "adds.*lightning" in mod_lower:
+            item_tags.append("lightning")
+        
+        # Physical/Chaos
+        if "physical" in mod_lower:
+            item_tags.append("physical")
+        if "chaos" in mod_lower:
+            item_tags.append("chaos")
+        
+        # Defense
+        if "armor" in mod_lower or "evasion" in mod_lower or "energy shield" in mod_lower:
+            item_tags.append("defense")
+        
+        # Attack/Spell
+        if "attack" in mod_lower:
+            item_tags.append("attack")
+        if "spell" in mod_lower:
+            item_tags.append("spell")
+    
+    # Add influence tags
+    if influences:
+        for influence_type in influences.keys():
+            item_tags.append(influence_type.lower())
+    
     open_affixes = max(0, 6 - total_affixes)
+    
+    # Calculate meta utility score
+    meta_utility_score = 0.0
+    if meta_scores and item_tags:
+        meta_utility_score = calculate_meta_utility_score(
+            list(set(item_tags)),  # Deduplicate tags
+            meta_scores,
+            aggregation="mean"
+        )
     
     return {
         "is_influenced": feature_influence,
         "ilvl": ilvl,
+        "base_type": base_type,
         "tier_life": tier_life,
         "tier_speed": tier_speed,
+        "tier_resist": tier_resist,
+        "tier_crit": tier_crit,
         "open_affixes": open_affixes,
+        "listed_at": listed_at,
+        "meta_utility_score": meta_utility_score,
         "price_chaos": round(price_chaos, 1)
     }
 
-def fetch_training_data(target_bases: List[str], items_per_base: int = 500) -> pd.DataFrame:
+
+def parse_listing_timestamp(listed_at: str) -> Optional[datetime]:
+    """
+    Parse GGG Trade API timestamp string to datetime.
+    
+    Args:
+        listed_at: ISO format timestamp string
+        
+    Returns:
+        Parsed datetime or None if parsing fails
+    """
+    if not listed_at:
+        return None
+    
+    try:
+        # GGG uses ISO format: "2024-01-15T10:30:00Z" or similar
+        # Handle various ISO formats
+        listed_at = listed_at.replace('Z', '+00:00')
+        return datetime.fromisoformat(listed_at)
+    except (ValueError, TypeError):
+        return None
+
+
+def is_listing_stale(
+    listed_at: str,
+    hours_threshold: float = 48.0
+) -> bool:
+    """
+    Check if a listing is stale (listed for too long).
+    
+    Args:
+        listed_at: ISO timestamp of listing
+        hours_threshold: Hours threshold for staleness
+        
+    Returns:
+        True if listing is stale
+    """
+    parsed_time = parse_listing_timestamp(listed_at)
+    if not parsed_time:
+        return False
+    
+    # Handle timezone-aware vs naive comparison
+    try:
+        age = datetime.now(parsed_time.tzinfo) - parsed_time
+    except TypeError:
+        # Mixed naive/aware comparison
+        age = datetime.now() - parsed_time.replace(tzinfo=None)
+    
+    return age > timedelta(hours=hours_threshold)
+
+
+def remove_price_outliers_iqr(
+    df: pd.DataFrame,
+    group_col: str = "base_type",
+    price_col: str = "price_chaos",
+    multiplier: float = 1.5
+) -> pd.DataFrame:
+    """
+    Remove price outliers using IQR method grouped by base type.
+    
+    Removes items where price < Q1 - 1.5*IQR (price fixers) or
+    price > Q3 + 1.5*IQR (absurd prices).
+    
+    Args:
+        df: Input DataFrame
+        group_col: Column to group by (e.g., "base_type")
+        price_col: Price column name
+        multiplier: IQR multiplier (default 1.5)
+        
+    Returns:
+        Filtered DataFrame with outliers removed
+    """
+    if df.empty:
+        return df
+    
+    # Vectorized IQR calculation per group
+    def calculate_iqr_bounds(group: pd.Series) -> Tuple[float, float]:
+        """Calculate IQR bounds for a price group."""
+        q1 = group.quantile(0.25)
+        q3 = group.quantile(0.75)
+        iqr = q3 - q1
+        lower_bound = q1 - multiplier * iqr
+        upper_bound = q3 + multiplier * iqr
+        return lower_bound, upper_bound
+    
+    # Calculate bounds for each base_type
+    bounds = df.groupby(group_col)[price_col].apply(calculate_iqr_bounds).to_dict()
+    
+    # Vectorized filtering
+    def is_within_bounds(row: pd.Series) -> bool:
+        """Check if price is within IQR bounds for its base_type."""
+        base = row[group_col]
+        price = row[price_col]
+        
+        if base not in bounds:
+            return True  # Keep if no bounds calculated
+        
+        lower, upper = bounds[base]
+        return lower <= price <= upper
+    
+    mask = df.apply(is_within_bounds, axis=1)
+    filtered_df = df[mask].copy()
+    
+    removed_count = len(df) - len(filtered_df)
+    if removed_count > 0:
+        print(f"🧹 [IQR Filter] Removed {removed_count} price outliers ({removed_count/len(df)*100:.1f}%)")
+    
+    return filtered_df
+
+
+def remove_stale_listings(
+    df: pd.DataFrame,
+    hours_threshold: float = 48.0,
+    min_tier_score: int = 2
+) -> pd.DataFrame:
+    """
+    Remove stale listings that are likely fake (good tiers + low price + old).
+    
+    If an item has excellent tier scores but very low price AND has been
+    listed for > threshold hours, it's likely a fake/scam listing.
+    
+    Args:
+        df: Input DataFrame
+        hours_threshold: Hours threshold for staleness
+        min_tier_score: Minimum tier score to be considered "excellent"
+        
+    Returns:
+        Filtered DataFrame
+    """
+    if df.empty or "listed_at" not in df.columns:
+        return df
+    
+    # Calculate total tier score (sum of all tier columns)
+    tier_columns = ["tier_life", "tier_speed", "tier_resist", "tier_crit"]
+    available_tier_cols = [col for col in tier_columns if col in df.columns]
+    
+    if not available_tier_cols:
+        return df
+    
+    # Vectorized tier score calculation
+    df = df.copy()
+    df["total_tier_score"] = df[available_tier_cols].sum(axis=1)
+    
+    # Get price statistics for "low price" determination
+    price_q25 = df["price_chaos"].quantile(0.25)
+    
+    # Vectorized staleness check
+    def is_stale_row(row: pd.Series) -> bool:
+        """Check if row represents a stale fake listing."""
+        listed_at = row.get("listed_at", "")
+        
+        if not listed_at:
+            return False
+        
+        # Check if stale
+        if not is_listing_stale(listed_at, hours_threshold):
+            return False
+        
+        # Check if has excellent tiers and low price
+        has_excellent_tiers = row["total_tier_score"] >= min_tier_score
+        has_low_price = row["price_chaos"] <= price_q25
+        
+        return has_excellent_tiers and has_low_price
+    
+    mask = ~df.apply(is_stale_row, axis=1)
+    filtered_df = df[mask].copy()
+    
+    # Drop temporary column
+    filtered_df = filtered_df.drop(columns=["total_tier_score"], errors="ignore")
+    
+    removed_count = len(df) - len(filtered_df)
+    if removed_count > 0:
+        print(f"🧹 [Stale Filter] Removed {removed_count} likely fake stale listings")
+    
+    return filtered_df
+
+
+def extract_item_tags_vectorized(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Vectorized extraction of item tags for meta scoring.
+    
+    Args:
+        df: Input DataFrame with item data
+        
+    Returns:
+        DataFrame with extracted tag information
+    """
+    if df.empty:
+        return df
+    
+    df = df.copy()
+    
+    # Initialize tag columns (vectorized operations)
+    tag_categories = [
+        "has_life", "has_speed", "has_resist", "has_crit",
+        "has_fire", "has_cold", "has_lightning",
+        "has_physical", "has_chaos", "has_defense"
+    ]
+    
+    for tag in tag_categories:
+        df[tag] = 0
+    
+    # These would be populated from mod parsing - simplified version
+    df["has_life"] = (df["tier_life"] > 0).astype(int)
+    df["has_speed"] = (df["tier_speed"] > 0).astype(int)
+    df["has_resist"] = (df["tier_resist"] > 0).astype(int)
+    df["has_crit"] = (df["tier_crit"] > 0).astype(int)
+    
+    return df
+
+
+def fetch_training_data(
+    target_bases: List[str],
+    items_per_base: int = 500,
+    league: str = "Standard",
+    apply_outlier_filter: bool = True,
+    apply_stale_filter: bool = True
+) -> pd.DataFrame:
     """
     Faz consultas Live GGG Trade API com rate limit respeitado e extrai os itens pro DataSet.
+    
+    Args:
+        target_bases: List of base types to query
+        items_per_base: Number of items to fetch per base
+        league: PoE league
+        apply_outlier_filter: Whether to apply IQR price outlier removal
+        apply_stale_filter: Whether to apply stale listing filter
+        
+    Returns:
+        DataFrame with training data
     """
-    client = MarketAPIClient(league="Standard")
+    client = MarketAPIClient(league=league)
     currency_rates = client.sync_ninja_economy()
+    
+    # Initialize meta analyzer and fetch current meta scores
+    print("🌐 [Meta] Fetching current ladder meta scores...")
+    analyzer = LadderAnalyzer(league=league)
+    meta_scores = analyzer.fetch_meta_weights(force_refresh=False)
+    
+    if meta_scores.scores:
+        print(f"✅ [Meta] Loaded {len(meta_scores.scores)} tag weights from meta analysis")
+    else:
+        print("⚠️ [Meta] Could not fetch meta scores, using default weights")
     
     dataset = []
     
@@ -94,7 +421,8 @@ def fetch_training_data(target_bases: List[str], items_per_base: int = 500) -> p
         TextColumn("({task.completed}/{task.total} iter)"),
     ) as progress:
     
-        overall_task = progress.add_task("[cyan]Comunicação com API GGG...", total=len(target_bases) * (items_per_base // 10))
+        total_iterations = len(target_bases) * ((items_per_base + 9) // 10)  # Ceiling division
+        overall_task = progress.add_task("[cyan]Comunicação com API GGG...", total=total_iterations)
         
         for base_type in target_bases:
             progress.update(overall_task, description=f"[cyan]A Sacar Mercado: {base_type}...")
@@ -106,7 +434,7 @@ def fetch_training_data(target_bases: List[str], items_per_base: int = 500) -> p
                     "filters": {
                         "trade_filters": {
                             "filters": {
-                                "price": {"min": 1} # Item precisa de ter buyout
+                                "price": {"min": 1}  # Item precisa de ter buyout
                             }
                         }
                     }
@@ -133,27 +461,88 @@ def fetch_training_data(target_bases: List[str], items_per_base: int = 500) -> p
                     # Filtra preços corruptos / trocas (ex: WTB)
                     if not item_json.get("listing", {}).get("price", {}).get("amount"):
                         continue
-                        
-                    features = parse_trade_item_to_features(item_json, currency_rates)
-                    dataset.append(features)
+                    
+                    # Parse features with meta score integration
+                    features = parse_trade_item_to_features(
+                        item_json,
+                        currency_rates,
+                        meta_scores=meta_scores
+                    )
+                    
+                    if features:  # Only add if not filtered out
+                        dataset.append(features)
                     
                 progress.advance(overall_task, advance=1)
                 
-    return pd.DataFrame(dataset)
+    df = pd.DataFrame(dataset)
+    
+    if df.empty:
+        print("⚠️ [Training] No data fetched from API")
+        return df
+    
+    print(f"\n📊 [Training] Fetched {len(df)} raw items from API")
+    
+    # Apply IQR-based price outlier removal
+    if apply_outlier_filter and len(df) > 10:
+        df = remove_price_outliers_iqr(df, group_col="base_type", price_col="price_chaos")
+    
+    # Apply stale listing filter
+    if apply_stale_filter and len(df) > 10:
+        df = remove_stale_listings(df, hours_threshold=48.0, min_tier_score=2)
+    
+    # Clean up temporary columns not needed for training
+    columns_to_drop = ["listed_at", "base_type"]
+    for col in columns_to_drop:
+        if col in df.columns:
+            df = df.drop(columns=[col])
+    
+    print(f"📊 [Training] Final dataset size after filtering: {len(df)} items")
+    
+    return df
 
-def train_xgboost_oracle():
-    print("🚀 [Fase 6.1] Iniciando Treino do XGBoost com Dados Reais da Trade API...")
-    target_bases = ["Imbued Wand", "Spine Bow", "Titanium Spirit Shield", "Vaal Regalia", "Hubris Circlet", "Sadist Garb"]
+
+def train_xgboost_oracle(
+    league: str = "Standard",
+    items_per_base: int = 500
+) -> None:
+    """
+    Train the XGBoost price oracle with filtered market data.
+    
+    Args:
+        league: PoE league to train on
+        items_per_base: Number of items to fetch per base type
+    """
+    print(f"🚀 [Fase 6.1] Iniciando Treino do XGBoost com Dados Reais da Trade API...")
+    print(f"   Liga: {league}")
+    
+    target_bases = [
+        "Imbued Wand",
+        "Spine Bow",
+        "Titanium Spirit Shield",
+        "Vaal Regalia",
+        "Hubris Circlet",
+        "Sadist Garb"
+    ]
     
     # O GGG Rate Limit aciona demorados limites (timeout 60s) em largas extrações.
     # Puxaremos 500 de cada base x 6 = 3000 itens (respeitando a requisição de 2k-5k itens).
-    df = fetch_training_data(target_bases, items_per_base=500)
+    df = fetch_training_data(
+        target_bases,
+        items_per_base=items_per_base,
+        league=league,
+        apply_outlier_filter=True,
+        apply_stale_filter=True
+    )
     
     if len(df) < 50:
-         print("❌ Dados insuficientes extraídos (menos que 50). Verifique o GGG Ban IP.")
-         sys.exit(1)
-         
+        print("❌ Dados insuficientes extraídos (menos que 50). Verifique o GGG Ban IP.")
+        sys.exit(1)
+    
     print(f"\n📊 Extracção Completa! Dados Válidos Encontrados: {len(df)} listagens.")
+    
+    # Feature summary
+    feature_cols = [col for col in df.columns if col != "price_chaos"]
+    print(f"📋 Features usadas: {', '.join(feature_cols)}")
     
     # ML Pipeline
     X = df.drop("price_chaos", axis=1)
@@ -161,7 +550,9 @@ def train_xgboost_oracle():
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
+    print(f"🧠 Treino: {len(X_train)} amostras | Teste: {len(X_test)} amostras")
     print("🧠 Injetando Matrizes no XGBoost Regressor...")
+    
     dtrain = xgb.DMatrix(X_train, label=y_train)
     dtest = xgb.DMatrix(X_test, label=y_test)
     
@@ -175,20 +566,53 @@ def train_xgboost_oracle():
     evals = [(dtrain, 'train'), (dtest, 'eval')]
     
     # Early Stopping Preemptivo para generalizar melhor
-    model = xgb.train(params, dtrain, num_rounds=150, evals=evals, early_stopping_rounds=15, verbose_eval=50)
+    model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=150,
+        evals=evals,
+        early_stopping_rounds=15,
+        verbose_eval=50
+    )
     
     # Avaliação de Erro Real (RMSE)
     preds = model.predict(dtest)
     rmse = np.sqrt(mean_squared_error(y_test, preds))
     
     print(f"\n🎯 [MÉTRICA] Root Mean Square Error (RMSE): {rmse:.2f} Chaos")
-    print("↳ Interpretação: Na média, a IA erra a previsão de preços por este valor em Chaos. O mercado é selvagem e volátil, mas a IA guiará o A*!")
+    print("↳ Interpretação: Na média, a IA erra a previsão de preços por este valor em Chaos.")
+    
+    # Feature importance
+    importance = model.get_score(importance_type='gain')
+    if importance:
+        print("\n📊 Feature Importance (Gain):")
+        sorted_importance = sorted(importance.items(), key=lambda x: x[1], reverse=True)
+        for feat, score in sorted_importance[:5]:
+            print(f"   {feat}: {score:.2f}")
     
     # Gravando .xgb final
     os.makedirs("data", exist_ok=True)
     model_path = os.path.join("data", "price_oracle.xgb")
     model.save_model(model_path)
-    print(f"✅ [SUCESSO] Cérebro atualizado e injetado com Big Data verdadeiro em {model_path}!")
+    print(f"\n✅ [SUCESSO] Cérebro atualizado e injetado com Big Data verdadeiro em {model_path}!")
+
 
 if __name__ == "__main__":
-    train_xgboost_oracle()
+    import typer
+    
+    app = typer.Typer()
+    
+    @app.command()
+    def train(
+        league: str = typer.Option("Standard", "--league", "-l", help="PoE league"),
+        items_per_base: int = typer.Option(500, "--items", "-i", help="Items per base type"),
+        skip_outlier_filter: bool = typer.Option(False, "--skip-outliers", help="Skip IQR outlier removal"),
+        skip_stale_filter: bool = typer.Option(False, "--skip-stale", help="Skip stale listing filter")
+    ):
+        """Train the XGBoost price oracle."""
+        train_xgboost_oracle(
+            league=league,
+            items_per_base=items_per_base
+        )
+    
+    app()
