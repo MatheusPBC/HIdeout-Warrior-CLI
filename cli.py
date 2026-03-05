@@ -171,6 +171,7 @@ def scan(
     table.add_column("Valor ML (Chaos)", justify="right", style="magenta")
     table.add_column("Lucro (Chaos)", justify="right", style="bold")
     table.add_column("Comando Whisper", style="dim white")
+    table.add_column("Link Trade", style="blue")
     
     for r in results:
         profit = r["profit"]
@@ -178,12 +179,20 @@ def scan(
         # Colorir lucros altos
         profit_style = "bold green" if profit > 50.0 else "yellow" if profit > 0 else "white"
         
+        # Truncate whisper for display
+        whisper_display = r["whisper"][:80] + "..." if len(r["whisper"]) > 80 else r["whisper"]
+        
+        # Truncate link for display
+        trade_link = r.get("trade_link", "")
+        link_display = trade_link[:50] + "..." if len(trade_link) > 50 else trade_link
+        
         table.add_row(
             r["base_type"],
             f"{r['listed_price']:.1f}",
             f"{r['ml_value']:.1f}",
             f"[{profit_style}]{profit:.1f}[/]",
-            r["whisper"][:80] + "..." if len(r["whisper"]) > 80 else r["whisper"]
+            whisper_display,
+            link_display
         )
         
     console.print(table)

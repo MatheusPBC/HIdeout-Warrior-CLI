@@ -156,13 +156,18 @@ class OnDemandScanner:
                  ml_value = self.oracle.predict_value(state)
                  profit = ml_value - listed_price_chaos
                  
+                 # Build trade link
+                 item_id = item_json.get("id", "")
+                 trade_link = f"https://www.pathofexile.com/trade/view/{self.api_client.league}/{query_id}/{item_id}"
+                 
                  evaluated_items.append({
                      "base_type": state.base_type,
                      "ilvl": state.ilvl,
                      "listed_price": round(listed_price_chaos, 1),
                      "ml_value": round(ml_value, 1),
                      "profit": round(profit, 1),
-                     "whisper": whisper
+                     "whisper": whisper,
+                     "trade_link": trade_link
                  })
 
         # Sort: Margens mais lucrosas no TOP
