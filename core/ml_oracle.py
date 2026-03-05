@@ -36,7 +36,7 @@ class PricePredictor:
             pass
 
     def _extract_features(self, item_state: 'ItemState') -> list:
-         """Extrai as 5 features usadas no nosso dataset de treino XGBoost."""
+         """Extrai as 8 features usadas no nosso dataset de treino XGBoost."""
          current_mods = set(item_state.prefixes).union(set(item_state.suffixes))
          
          is_influenced = 1 if item_state.is_fractured else 0 # Simplificação: usando fracture como influence flag pro mock
@@ -45,16 +45,26 @@ class PricePredictor:
          # Analisa Tiers simplificados para o modelo
          tier_life = 0
          tier_speed = 0
+         tier_resist = 0
+         tier_crit = 0
          
          for mod in current_mods:
-             if "life" in mod.lower():
-                 tier_life = 1 if "1" in mod else 2
-             if "speed" in mod.lower():
-                 tier_speed = 1 if "1" in mod else 2
+             mod_lower = mod.lower()
+             if "life" in mod_lower:
+                 tier_life = 1 if "1" in mod_lower else 2
+             if "speed" in mod_lower:
+                 tier_speed = 1 if "1" in mod_lower else 2
+             if "resistance" in mod_lower or "resist" in mod_lower:
+                 tier_resist = 1
+             if "critical" in mod_lower or "crit" in mod_lower:
+                 tier_crit = 1
                  
          open_affixes = item_state.open_prefixes + item_state.open_suffixes
          
-         return [[is_influenced, ilvl, tier_life, tier_speed, open_affixes]]
+         # meta_utility_score requer LadderAnalyzer - usando 0 como default
+         meta_utility_score = 0.0
+         
+         return [[is_influenced, ilvl, tier_life, tier_speed, tier_resist, tier_crit, open_affixes, meta_utility_score]]
 
     def predict_value(self, item_state: 'ItemState') -> float:
         """
@@ -71,7 +81,7 @@ class PricePredictor:
              import xgboost as xgb
              
              features = self._extract_features(item_state)
-             df = pd.DataFrame(features, columns=["is_influenced", "ilvl", "tier_life", "tier_speed", "open_affixes"])
+             df = pd.DataFrame(features, columns=["is_influenced", "ilvl", "tier_life", "tier_speed", "tier_resist", "tier_crit", "open_affixes", "meta_utility_score"])
              dmatrix = xgb.DMatrix(df)
              
              prediction = self.model.predict(dmatrix)
