@@ -183,7 +183,7 @@ def scan(
             f"{r['listed_price']:.1f}",
             f"{r['ml_value']:.1f}",
             f"[{profit_style}]{profit:.1f}[/]",
-            r["whisper"][:40] + "..." if len(r["whisper"]) > 40 else r["whisper"]
+            r["whisper"][:80] + "..." if len(r["whisper"]) > 80 else r["whisper"]
         )
         
     console.print(table)
