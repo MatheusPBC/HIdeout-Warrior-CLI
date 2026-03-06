@@ -4,30 +4,104 @@ import time
 import requests
 from typing import List, Dict, Tuple, Any
 
+
 class MarketAPIClient:
     """
     Fase 1: Motor da Fundaçao do Data Layer.
     Integração dual: Web-Scraping Defensivo do poe.ninja (Sistema de Cache) e
     Cliente Seguro e Tolerante à Falhas da Trade API GGG (Circuit Breaker).
     """
-    def __init__(self, league: str = "Mirage", user_agent: str = "HideoutWarrior_CLI/1.0 (Contact: me@example.com)", data_dir: str = "data"):
+
+    def __init__(
+        self,
+        league: str = "Mirage",
+        user_agent: str = "HideoutWarrior_CLI/1.0 (Contact: me@example.com)",
+        data_dir: str = "data",
+    ):
+        self.requested_league = league
         self.league = league
         self.data_dir = data_dir
-        
+
         self.market_cache_file = os.path.join(self.data_dir, "market_prices.json")
-        
+
         self.ggg_base_url = "https://www.pathofexile.com/api/trade"
         self.ninja_base_url = "https://poe.ninja/api/data"
-        
+
         self.headers = {
             "User-Agent": user_agent,
             "Accept": "application/json",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
         self.session = requests.Session()
         self.session.headers.update(self.headers)
-        
+
         os.makedirs(self.data_dir, exist_ok=True)
+
+        self.league = self._resolve_trade_league(self.requested_league)
+
+    def _fetch_trade_leagues(self) -> List[str]:
+        """Busca as ligas válidas da Trade API para PC."""
+        url = "https://www.pathofexile.com/api/trade/data/leagues"
+        try:
+            response = self.session.get(url, timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+            result = payload.get("result", []) if isinstance(payload, dict) else []
+
+            leagues: List[str] = []
+            seen = set()
+            for entry in result:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("realm") != "pc":
+                    continue
+                league_id = entry.get("id")
+                if not isinstance(league_id, str):
+                    continue
+                if league_id in seen:
+                    continue
+                seen.add(league_id)
+                leagues.append(league_id)
+
+            return leagues
+        except requests.exceptions.RequestException:
+            return []
+
+    def _resolve_trade_league(self, requested_league: str) -> str:
+        """
+        Resolve o nome da liga para um id válido da Trade API.
+        Se a liga não existir (ex.: season encerrada), cai para Standard.
+        """
+        available = self._fetch_trade_leagues()
+        if not available:
+            return requested_league
+
+        requested = (requested_league or "").strip()
+        requested_lower = requested.lower()
+
+        # Match exato case-insensitive
+        for league in available:
+            if league.lower() == requested_lower:
+                return league
+
+        # Match parcial (ex.: "settlers" -> "Settlers of Kalguur")
+        contains = [
+            league
+            for league in available
+            if requested_lower and requested_lower in league.lower()
+        ]
+        if contains:
+            return contains[0]
+
+        # Fallback para liga estável se season não estiver disponível
+        if "Standard" in available:
+            print(
+                f"⚠️ [MarketAPI-GGG] Liga '{requested_league}' não disponível na Trade API. "
+                "Usando 'Standard'."
+            )
+            return "Standard"
+
+        return available[0]
 
     # ----------------------------------------------------
     #  PoE Ninja API - Economy Sync & 4-Hour Caching
@@ -37,7 +111,7 @@ class MarketAPIClient:
         """Determina se o cache local em disco expirou baseando-se no timestamp da Geração."""
         if not os.path.exists(filepath):
             return False
-            
+
         file_mod_time = os.path.getmtime(filepath)
         age_hours = (time.time() - file_mod_time) / 3600.0
         return age_hours < max_age_hours
@@ -48,20 +122,28 @@ class MarketAPIClient:
         Sempre retornará uma dict com o Ratio {Currency: ChaosEquivalent}.
         Caches da requisição duram 4h para proteger o rate limit do site terceiro.
         """
-        if not force_update and self._is_cache_valid(self.market_cache_file, max_age_hours=4.0):
-            print("💽 [MarketAPI-Ninja] Economia do cache carrega: Menos de 4h desde o último log.")
+        if not force_update and self._is_cache_valid(
+            self.market_cache_file, max_age_hours=4.0
+        ):
+            print(
+                "💽 [MarketAPI-Ninja] Economia do cache carrega: Menos de 4h desde o último log."
+            )
             with open(self.market_cache_file, "r", encoding="utf-8") as f:
                 return json.load(f)
-                
+
         print("🌐 [MarketAPI-Ninja] Sincronização viva de Economy com Poe.Ninja...")
         # Em escopo amplo, outras rotas (Fossils/Essences) devem ser anexadas a este payload.
-        url = f"{self.ninja_base_url}/currencyoverview?league={self.league}&type=Currency"
-        
+        url = (
+            f"{self.ninja_base_url}/currencyoverview?league={self.league}&type=Currency"
+        )
+
         try:
-            response = requests.get(url, headers={"User-Agent": self.headers["User-Agent"]}, timeout=20)
+            response = requests.get(
+                url, headers={"User-Agent": self.headers["User-Agent"]}, timeout=20
+            )
             response.raise_for_status()
             data = response.json()
-            
+
             lines = data.get("lines", [])
             currency_rates = {}
             for line in lines:
@@ -69,14 +151,16 @@ class MarketAPIClient:
                 rate = line.get("chaosEquivalent", 0.0)
                 if currency_name:
                     currency_rates[currency_name] = rate
-                    
+
             # Persistindo o cache local
             with open(self.market_cache_file, "w", encoding="utf-8") as f:
                 json.dump(currency_rates, f, indent=2)
-                
+
             return currency_rates
         except requests.exceptions.RequestException as e:
-            print(f"❌ [MarketAPI-Ninja] Falha na rede ao conectar no Economy Scraper: {e}")
+            print(
+                f"❌ [MarketAPI-Ninja] Falha na rede ao conectar no Economy Scraper: {e}"
+            )
             return {}
 
     # ----------------------------------------------------
@@ -104,21 +188,23 @@ class MarketAPIClient:
         # Prevenção Preemptiva: Chega se estamos próximos do limite da Janela
         state_header = response.headers.get("X-Rate-Limit-Ip-State")
         limit_header = response.headers.get("X-Rate-Limit-Ip")
-        
+
         if state_header and limit_header:
             # O Formato do Cloudflare da GGG é: Hits:Max:Window.
-            # Ex: "1:4:60,4:12:300" 
-            rules_state = state_header.split(',')
+            # Ex: "1:4:60,4:12:300"
+            rules_state = state_header.split(",")
             for rule in rules_state:
-                parts = rule.split(':')
+                parts = rule.split(":")
                 if len(parts) >= 3:
                     current_hits = int(parts[0])
                     max_hits = int(parts[1])
-                    
+
                     # Defesa: Se estivermos a 1 única requisição de tomar Timeout 429...
                     if (max_hits - current_hits) <= 1:
-                        print(f"⚠️ [Circuit Breaker] Limite ({max_hits}) arriscadamente próximo ({current_hits}). Esfriando por 3s.")
-                        time.sleep(3) 
+                        print(
+                            f"⚠️ [Circuit Breaker] Limite ({max_hits}) arriscadamente próximo ({current_hits}). Esfriando por 3s."
+                        )
+                        time.sleep(3)
 
     def search_items(self, query_json: dict) -> Tuple[str, List[str]]:
         """
@@ -129,18 +215,22 @@ class MarketAPIClient:
             response = self.session.post(url, json=query_json, timeout=15)
             # Aciona a validação defensiva do Circuito antes de proceder a resposta!
             self._circuit_breaker(response)
-            
+
             if response.status_code == 200:
                 data = response.json()
                 return data.get("id", ""), data.get("result", [])
             else:
-                print(f"❌ [MarketAPI-GGG] Search Error {response.status_code}: {response.text}")
+                print(
+                    f"❌ [MarketAPI-GGG] Search Error {response.status_code}: {response.text}"
+                )
                 return "", []
         except requests.exceptions.RequestException as e:
             print(f"❌ [MarketAPI-GGG] Sub-Error Fatal de Rede nas Searches: {e}")
             return "", []
 
-    def fetch_item_details(self, item_ids: List[str], query_id: str) -> List[Dict[str, Any]]:
+    def fetch_item_details(
+        self, item_ids: List[str], query_id: str
+    ) -> List[Dict[str, Any]]:
         """
         Baixa os detalhes do MetaData Trade (Preço, Conta do Usuário) em blocos.
         Envia um GET para {id1,id2,id3}?query={query_id}.
@@ -148,49 +238,56 @@ class MarketAPIClient:
         """
         if not item_ids:
             return []
-            
+
         if len(item_ids) > 10:
-            print("⏳ [MarketAPI-INFO] A API suporta apenas blocos de 10. Processando 10 primários...")
+            print(
+                "⏳ [MarketAPI-INFO] A API suporta apenas blocos de 10. Processando 10 primários..."
+            )
             item_ids = item_ids[:10]
-            
+
         ids_str = ",".join(item_ids)
         url = f"{self.ggg_base_url}/fetch/{ids_str}?query={query_id}"
-        
+
         # Micro-fricção de Civilidade base da GGG.
         time.sleep(0.5)
-        
+
         try:
             response = self.session.get(url, timeout=15)
             self._circuit_breaker(response)
-            
+
             if response.status_code == 200:
                 data = response.json()
                 return data.get("result", [])
             else:
-                print(f"❌ [MarketAPI-GGG] Fetch Error {response.status_code}: {response.text}")
+                print(
+                    f"❌ [MarketAPI-GGG] Fetch Error {response.status_code}: {response.text}"
+                )
                 return []
         except requests.exceptions.RequestException as e:
             print(f"❌ [MarketAPI-GGG] Fetch FATAL Error de Conexão: {e}")
             return []
 
+
 if __name__ == "__main__":
     print("--- Teste de Stress/Cache da Market API ---")
-    client = MarketAPIClient(league="Standard") 
-    
+    client = MarketAPIClient(league="Standard")
+
     # Valida Cache de 4 Horas
     prices = client.sync_ninja_economy()
-    print(f"Total Currências em Cache (ChaosRatio): {len(prices)}. Divine: {prices.get('Divine Orb')}")
-    
+    print(
+        f"Total Currências em Cache (ChaosRatio): {len(prices)}. Divine: {prices.get('Divine Orb')}"
+    )
+
     # Valida Limitadores da Busca Live
     test_query = {
         "query": {
             "status": {"option": "online"},
             "type": "Simple Robe",
-            "name": "Tabula Rasa"
+            "name": "Tabula Rasa",
         },
-        "sort": {"price": "asc"}
+        "sort": {"price": "asc"},
     }
-    
+
     q_id, items = client.search_items(test_query)
     if q_id and items:
         # Puxa 2 itens para testar o sleep e fetch
