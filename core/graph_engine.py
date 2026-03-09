@@ -87,7 +87,8 @@ class CraftingGraphEngine:
         # Se o item possui combinações que o mercado valoriza profundamente,
         # Nós abatemos o custo artificial G para encorajar a IA a não ignorar este ramo
         # acreditando cegamente num path linear ineficiente.
-        predicted_profit_value = self.price_predictor.predict_value(current_state)
+        predicted_profit = self.price_predictor.predict_value(current_state)
+        predicted_profit_value = predicted_profit[0] if isinstance(predicted_profit, tuple) else predicted_profit
         
         # Heurística Submissiva: Acreditamos otimisticamente que os mods faltantes vão
         # custar pelo menos 5 Chaos Orbs cada num mundo perfeito onde hitamos 100%.
@@ -183,7 +184,8 @@ class CraftingGraphEngine:
             # Verifica Objetivo: O item possui TODOS os targets estritos da busca JSON?
             # E Avalia Alternativamente usando o Oráculo: Achamos um item "bom demais pra roletar" no meio do caminho?
             current_mods = current_state.prefixes.union(current_state.suffixes)
-            predicted_value = self.price_predictor.predict_value(current_state)
+            predicted_prediction = self.price_predictor.predict_value(current_state)
+            predicted_value = predicted_prediction[0] if isinstance(predicted_prediction, tuple) else predicted_prediction
             
             # Condição Alternativa ROI: Se gastamos > 10c, e o item agora vale 3x mais que o gasto, param e vende!
             roi_hit = (g_cost > 10.0 and predicted_value >= (g_cost * 3.0))
@@ -241,3 +243,5 @@ if __name__ == "__main__":
              print(f" {i}. {step}")
     else:
          print("❌ Nenhuma Rota possível identificada nesse orçamento.")
+
+
