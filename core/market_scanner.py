@@ -40,6 +40,7 @@ class ScanStats:
     total_evaluated: int = 0
     filtered_anti_fix: int = 0
     filtered_min_profit: int = 0
+    filtered_min_listed_price: int = 0
     skipped_invalid_currency: int = 0
     filtered_safe_buy_confidence: int = 0
     filtered_safe_buy_age: int = 0
@@ -132,12 +133,14 @@ class OnDemandScanner:
         ilvl_min: int = 1,
         rarity: str = "rare",
         is_influenced: bool = False,
+        min_listed_price: float = 1.0,
     ) -> dict:
+        query_min_price = max(min_listed_price, 1.0)
         query: dict = {
             "query": {
                 "status": {"option": "online"},
                 "filters": {
-                    "trade_filters": {"filters": {"price": {"min": 1}}},
+                    "trade_filters": {"filters": {"price": {"min": query_min_price}}},
                     "type_filters": {"filters": {"rarity": {"option": rarity}}},
                     "misc_filters": {"filters": {"ilvl": {"min": ilvl_min}}},
                 },
@@ -209,7 +212,9 @@ class OnDemandScanner:
         ninja_key = ninja_key_map.get(currency, currency.title() + " Orb")
         rate = self.currency_rates.get(ninja_key)
         if rate is None:
-            logger.warning("Moeda não encontrada nas taxas: %s (%s)", currency, ninja_key)
+            logger.warning(
+                "Moeda não encontrada nas taxas: %s (%s)", currency, ninja_key
+            )
             return None
 
         return amount * rate
@@ -264,6 +269,9 @@ class OnDemandScanner:
         if ml_confidence < 0.5:
             flags.append("low_confidence")
 
+        if snapshot.listed_price >= 80 and ml_confidence < 0.75:
+            flags.append("high_ticket_low_confidence")
+
         if snapshot.listed_price < 5:
             flags.append("cheap_listing")
 
@@ -289,24 +297,29 @@ class OnDemandScanner:
             return 0.0
 
         profit = ml_value - listed_price
-        relative_discount = max(profit / max(listed_price, 1.0), 0.0)
+        roi = max(profit / max(listed_price, 1.0), 0.0)
+        relative_discount = max(profit / max(ml_value, 1.0), 0.0)
 
         score = 0.0
-        score += max(profit, 0.0) * 0.45
-        score += min(relative_discount, 5.0) * 12.0
-        score += ml_confidence * 35.0
+        score += min(max(profit, 0.0), 200.0) * 0.15
+        score += min(roi, 3.0) * 28.0
+        score += min(relative_discount, 0.8) * 35.0
+        score += ml_confidence * 30.0
 
         penalties = {
             "price_fix_suspected": 45.0,
             "stale_listing": 8.0,
             "low_confidence": 10.0,
+            "high_ticket_low_confidence": 18.0,
             "cheap_listing": 4.0,
             "corrupted": 6.0,
         }
         score -= sum(penalties.get(flag, 0.0) for flag in risk_flags)
         return round(max(score, 0.0), 1)
 
-    def _build_listing_snapshot(self, item_json: dict, query_id: str) -> Optional[ListingSnapshot]:
+    def _build_listing_snapshot(
+        self, item_json: dict, query_id: str
+    ) -> Optional[ListingSnapshot]:
         listing = item_json.get("listing", {})
         item_data = item_json.get("item", {})
         whisper = listing.get("whisper", "")
@@ -404,6 +417,7 @@ class OnDemandScanner:
         rarity: str = "rare",
         max_items: int = 30,
         min_profit: float = float("-inf"),
+        min_listed_price: float = 0.0,
         anti_fix: bool = True,
         stale_hours: float = 48.0,
         safe_buy: bool = False,
@@ -411,7 +425,13 @@ class OnDemandScanner:
         if max_items <= 0:
             return [], ScanStats(resolved_league=self.api_client.league)
 
-        query = self.build_trade_query(item_class, ilvl_min, rarity, False)
+        query = self.build_trade_query(
+            item_class,
+            ilvl_min,
+            rarity,
+            False,
+            min_listed_price=max(min_listed_price, 1.0),
+        )
         query_id, result_ids = self.api_client.search_items(query)
         if not query_id or not result_ids:
             return [], ScanStats(resolved_league=self.api_client.league)
@@ -421,13 +441,16 @@ class OnDemandScanner:
         total_evaluated = 0
         filtered_anti_fix = 0
         filtered_min_profit = 0
+        filtered_min_listed_price = 0
         skipped_invalid_currency = 0
         filtered_safe_buy_confidence = 0
         filtered_safe_buy_age = 0
         filtered_safe_buy_price = 0
 
         for i in range(0, len(target_ids), 10):
-            details = self.api_client.fetch_item_details(target_ids[i : i + 10], query_id)
+            details = self.api_client.fetch_item_details(
+                target_ids[i : i + 10], query_id
+            )
             for item_json in details:
                 listing = item_json.get("listing", {})
                 if not listing.get("whisper"):
@@ -443,12 +466,22 @@ class OnDemandScanner:
 
                 total_evaluated += 1
 
+                if opportunity.listed_price < min_listed_price:
+                    filtered_min_listed_price += 1
+                    continue
+
                 if anti_fix and "price_fix_suspected" in opportunity.risk_flags:
                     filtered_anti_fix += 1
                     continue
 
                 if safe_buy:
-                    if opportunity.ml_confidence < 0.7:
+                    confidence_threshold = 0.70
+                    if opportunity.listed_price >= 120:
+                        confidence_threshold = 0.82
+                    elif opportunity.listed_price >= 50:
+                        confidence_threshold = 0.78
+
+                    if opportunity.ml_confidence < confidence_threshold:
                         filtered_safe_buy_confidence += 1
                         continue
                     age_hours = self._listing_age_hours(opportunity.indexed_at)
@@ -472,11 +505,14 @@ class OnDemandScanner:
             total_evaluated=total_evaluated,
             filtered_anti_fix=filtered_anti_fix,
             filtered_min_profit=filtered_min_profit,
+            filtered_min_listed_price=filtered_min_listed_price,
             skipped_invalid_currency=skipped_invalid_currency,
             filtered_safe_buy_confidence=filtered_safe_buy_confidence,
             filtered_safe_buy_age=filtered_safe_buy_age,
             filtered_safe_buy_price=filtered_safe_buy_price,
-            avg_profit=round(sum(o.profit for o in opportunities) / len(opportunities), 1)
+            avg_profit=round(
+                sum(o.profit for o in opportunities) / len(opportunities), 1
+            )
             if opportunities
             else 0.0,
             max_profit=max((o.profit for o in opportunities), default=0.0),
@@ -495,6 +531,7 @@ class OnDemandScanner:
         rarity: str = "rare",
         max_items: int = 30,
         min_profit: float = float("-inf"),
+        min_listed_price: float = 0.0,
         anti_fix: bool = True,
         stale_hours: float = 48.0,
         safe_buy: bool = False,
@@ -505,6 +542,7 @@ class OnDemandScanner:
             rarity=rarity,
             max_items=max_items,
             min_profit=min_profit,
+            min_listed_price=min_listed_price,
             anti_fix=anti_fix,
             stale_hours=stale_hours,
             safe_buy=safe_buy,

@@ -104,12 +104,42 @@ class FlipAdvisor:
     ]
 
     _ACTION_CATALOG = {
-        "SpellDamage1": ("Essence spam", 35.0, 0.42, "Força spell damage de forma relativamente controlada."),
-        "CastSpeed1": ("Harvest Reforge Speed", 20.0, 0.32, "Busca cast speed com um custo estável para flip de wand."),
-        "CritChanceSpells1": ("Bench craft crit", 8.0, 1.0, "Fechamento barato quando sobra espaço útil."),
-        "Life1": ("Essence of Greed", 18.0, 0.48, "Vida é o upgrade mais vendável para flips generalistas."),
-        "SpellSuppress1": ("Harvest Reforge Defence", 24.0, 0.26, "Tenta consolidar suppress/defence em bases elegíveis."),
-        "Resist1": ("Bench craft resistance", 4.0, 1.0, "Ajuste barato para fechar venda e viabilizar lucro."),
+        "SpellDamage1": (
+            "Essence spam",
+            35.0,
+            0.42,
+            "Força spell damage de forma relativamente controlada.",
+        ),
+        "CastSpeed1": (
+            "Harvest Reforge Speed",
+            20.0,
+            0.32,
+            "Busca cast speed com um custo estável para flip de wand.",
+        ),
+        "CritChanceSpells1": (
+            "Bench craft crit",
+            8.0,
+            1.0,
+            "Fechamento barato quando sobra espaço útil.",
+        ),
+        "Life1": (
+            "Essence of Greed",
+            18.0,
+            0.48,
+            "Vida é o upgrade mais vendável para flips generalistas.",
+        ),
+        "SpellSuppress1": (
+            "Harvest Reforge Defence",
+            24.0,
+            0.26,
+            "Tenta consolidar suppress/defence em bases elegíveis.",
+        ),
+        "Resist1": (
+            "Bench craft resistance",
+            4.0,
+            1.0,
+            "Ajuste barato para fechar venda e viabilizar lucro.",
+        ),
     }
 
     def __init__(self, league: str = "auto"):
@@ -122,6 +152,7 @@ class FlipAdvisor:
         rarity: str = "rare",
         max_items: int = 30,
         min_profit: float = 0.0,
+        min_listed_price: float = 0.0,
         anti_fix: bool = True,
         safe_buy: bool = False,
         stale_hours: float = 48.0,
@@ -134,6 +165,7 @@ class FlipAdvisor:
             rarity=rarity,
             max_items=max_items,
             min_profit=min_profit,
+            min_listed_price=min_listed_price,
             anti_fix=anti_fix,
             safe_buy=safe_buy,
             stale_hours=stale_hours,
@@ -147,14 +179,18 @@ class FlipAdvisor:
         budget: float,
     ) -> List[CraftPlan]:
         plans: List[CraftPlan] = []
-        ranked = sorted(opportunities, key=lambda opp: (opp.score, opp.profit), reverse=True)
+        ranked = sorted(
+            opportunities, key=lambda opp: (opp.score, opp.profit), reverse=True
+        )
 
         for opportunity in ranked[:10]:
             plan = self._build_plan(opportunity, budget)
             if plan is not None:
                 plans.append(plan)
 
-        plans.sort(key=lambda plan: (plan.expected_profit, plan.plan_confidence), reverse=True)
+        plans.sort(
+            key=lambda plan: (plan.expected_profit, plan.plan_confidence), reverse=True
+        )
 
         for index, plan in enumerate(plans):
             alternatives = []
@@ -166,7 +202,9 @@ class FlipAdvisor:
 
         return plans
 
-    def _build_plan(self, opportunity: ScanOpportunity, budget: float) -> CraftPlan | None:
+    def _build_plan(
+        self, opportunity: ScanOpportunity, budget: float
+    ) -> CraftPlan | None:
         target = self._recommend_target(opportunity)
         current_mods = set(self._extract_mod_tokens(opportunity))
         missing_mods = [mod for mod in target.goal_mods if mod not in current_mods]
@@ -177,7 +215,9 @@ class FlipAdvisor:
             return None
 
         expected_sale_value = target.expected_value
-        expected_profit = round(expected_sale_value - opportunity.listed_price - expected_craft_cost, 1)
+        expected_profit = round(
+            expected_sale_value - opportunity.listed_price - expected_craft_cost, 1
+        )
         if expected_profit <= 0:
             return None
 
@@ -212,7 +252,9 @@ class FlipAdvisor:
             risk_notes=risk_notes,
         )
 
-    def _recommend_target(self, opportunity: ScanOpportunity) -> FlipTargetRecommendation:
+    def _recommend_target(
+        self, opportunity: ScanOpportunity
+    ) -> FlipTargetRecommendation:
         profile = None
         for token, candidate in self._BASE_PROFILES:
             if token.lower() in opportunity.base_type.lower():
@@ -228,7 +270,9 @@ class FlipAdvisor:
             }
 
         missing_count = sum(
-            1 for mod in profile["goal_mods"] if mod not in self._extract_mod_tokens(opportunity)
+            1
+            for mod in profile["goal_mods"]
+            if mod not in self._extract_mod_tokens(opportunity)
         )
         expected_value = round(
             max(
@@ -237,7 +281,9 @@ class FlipAdvisor:
             ),
             1,
         )
-        confidence = max(0.4, min(0.9, opportunity.ml_confidence + 0.1 - (missing_count * 0.05)))
+        confidence = max(
+            0.4, min(0.9, opportunity.ml_confidence + 0.1 - (missing_count * 0.05))
+        )
 
         return FlipTargetRecommendation(
             label=str(profile["label"]),
@@ -281,11 +327,18 @@ class FlipAdvisor:
         for index, mod in enumerate(selected_mods, start=1):
             action_name, cost, probability, notes = self._ACTION_CATALOG.get(
                 mod,
-                ("Bench stabilization", 6.0, 1.0, "Fechamento conservador para preservar margem."),
+                (
+                    "Bench stabilization",
+                    6.0,
+                    1.0,
+                    "Fechamento conservador para preservar margem.",
+                ),
             )
             incremental_value = premium_total / max(len(selected_mods), 1)
             cumulative_share += incremental_value
-            expected_value_after_step = round(opportunity.ml_value + cumulative_share, 1)
+            expected_value_after_step = round(
+                opportunity.ml_value + cumulative_share, 1
+            )
             expected_cost = round(cost / max(probability, 0.05), 1)
 
             steps.append(
@@ -315,7 +368,10 @@ class FlipAdvisor:
         if not opportunity.risk_flags:
             return None
 
-        if "fractured" in opportunity.risk_flags or "influenced" in opportunity.risk_flags:
+        if (
+            "fractured" in opportunity.risk_flags
+            or "influenced" in opportunity.risk_flags
+        ):
             return CraftStep(
                 action_name="Annul / repair simple",
                 target_mod="cleanup",
@@ -328,14 +384,20 @@ class FlipAdvisor:
 
         return None
 
-    def _mark_stop_point(self, opportunity: ScanOpportunity, steps: List[CraftStep]) -> None:
+    def _mark_stop_point(
+        self, opportunity: ScanOpportunity, steps: List[CraftStep]
+    ) -> None:
         if not steps:
             return
 
         cumulative_cost = 0.0
         for step in steps:
             cumulative_cost += step.expected_cost
-            interim_profit = step.expected_value_after_step - opportunity.listed_price - cumulative_cost
+            interim_profit = (
+                step.expected_value_after_step
+                - opportunity.listed_price
+                - cumulative_cost
+            )
             if interim_profit > 0:
                 step.stop_here = True
                 break
@@ -349,7 +411,11 @@ class FlipAdvisor:
         cumulative_cost = 0.0
         for step in steps:
             cumulative_cost += step.expected_cost
-            interim_profit = step.expected_value_after_step - opportunity.listed_price - cumulative_cost
+            interim_profit = (
+                step.expected_value_after_step
+                - opportunity.listed_price
+                - cumulative_cost
+            )
             if step.stop_here or interim_profit >= (expected_profit * 0.65):
                 return (
                     f"Pare e venda se após '{step.action_name}' o valor implícito atingir "

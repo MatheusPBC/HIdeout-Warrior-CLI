@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.market_scanner import OnDemandScanner
+from core.market_scanner import ListingSnapshot, OnDemandScanner
 from core.graph_engine import ItemState
 
 
@@ -151,8 +151,58 @@ class TestOpportunityScoring:
         )
         assert clean_score > risky_score
 
-    def test_build_opportunity_includes_score_and_flags(self, scanner_with_mock_rates, mock_item_detail):
-        scanner_with_mock_rates.oracle.predict_value = MagicMock(return_value=(60.0, 0.45))
+    def test_risk_flags_include_high_ticket_low_confidence(
+        self, scanner_with_mock_rates
+    ):
+        snapshot = ListingSnapshot(
+            item_id="item-1",
+            base_type="Imbued Wand",
+            ilvl=84,
+            listed_price=100.0,
+            listing_currency="chaos",
+            listing_amount=100.0,
+            seller="seller",
+            indexed_at=None,
+            whisper="@seller hi",
+            trade_link="https://example.com/trade#item-1",
+            trade_search_link="https://example.com/trade",
+            corrupted=False,
+            fractured=False,
+        )
+
+        flags = scanner_with_mock_rates._risk_flags(
+            snapshot=snapshot,
+            ml_value=130.0,
+            ml_confidence=0.7,
+            stale_hours=48.0,
+        )
+
+        assert "high_ticket_low_confidence" in flags
+
+    def test_score_penalizes_high_ticket_low_confidence_flag(
+        self, scanner_with_mock_rates
+    ):
+        baseline_score = scanner_with_mock_rates._compute_opportunity_score(
+            listed_price=90.0,
+            ml_value=140.0,
+            ml_confidence=0.78,
+            risk_flags=[],
+        )
+        penalized_score = scanner_with_mock_rates._compute_opportunity_score(
+            listed_price=90.0,
+            ml_value=140.0,
+            ml_confidence=0.78,
+            risk_flags=["high_ticket_low_confidence"],
+        )
+
+        assert penalized_score < baseline_score
+
+    def test_build_opportunity_includes_score_and_flags(
+        self, scanner_with_mock_rates, mock_item_detail
+    ):
+        scanner_with_mock_rates.oracle.predict_value = MagicMock(
+            return_value=(60.0, 0.45)
+        )
         opportunity = scanner_with_mock_rates._build_opportunity(
             mock_item_detail,
             query_id="abc123",
@@ -162,3 +212,163 @@ class TestOpportunityScoring:
         assert opportunity.score >= 0
         assert "low_confidence" in opportunity.risk_flags
         assert opportunity.resolved_league == "Standard"
+
+
+class TestMinListedPriceFilter:
+    @patch("core.market_scanner.MarketAPIClient")
+    @patch("core.market_scanner.PricePredictor")
+    def test_scan_opportunities_filters_by_min_listed_price(
+        self,
+        mock_oracle_cls,
+        mock_client_cls,
+    ):
+        mock_client = mock_client_cls.return_value
+        mock_client.league = "Standard"
+        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
+        mock_client.search_items.return_value = ("query123", ["a", "b"])
+        mock_client.fetch_item_details.return_value = [
+            {
+                "id": "result_low",
+                "listing": {
+                    "whisper": "@seller hi",
+                    "price": {"amount": 5.0, "currency": "chaos"},
+                    "account": {"name": "seller1"},
+                    "indexed": "2026-03-10T09:00:00Z",
+                },
+                "item": {
+                    "id": "item_low",
+                    "baseType": "Driftwood Wand",
+                    "ilvl": 80,
+                    "explicitMods": ["+# to maximum Life"],
+                    "implicitMods": [],
+                    "corrupted": False,
+                    "fractured": False,
+                    "influences": {},
+                },
+            },
+            {
+                "id": "result_high",
+                "listing": {
+                    "whisper": "@seller hi",
+                    "price": {"amount": 60.0, "currency": "chaos"},
+                    "account": {"name": "seller2"},
+                    "indexed": "2026-03-10T09:00:00Z",
+                },
+                "item": {
+                    "id": "item_high",
+                    "baseType": "Imbued Wand",
+                    "ilvl": 84,
+                    "explicitMods": ["+#% increased Spell Damage"],
+                    "implicitMods": [],
+                    "corrupted": False,
+                    "fractured": False,
+                    "influences": {},
+                },
+            },
+        ]
+
+        mock_oracle = mock_oracle_cls.return_value
+        mock_oracle.predict_value.return_value = (120.0, 0.8)
+
+        scanner = OnDemandScanner(league="Standard")
+        opportunities, stats = scanner.scan_opportunities(
+            max_items=2,
+            min_listed_price=50.0,
+            anti_fix=False,
+        )
+
+        assert len(opportunities) == 1
+        assert opportunities[0].item_id == "item_high"
+        assert opportunities[0].listed_price == 60.0
+        assert stats.filtered_min_listed_price == 1
+
+
+class TestSafeBuyDynamicConfidence:
+    @patch("core.market_scanner.MarketAPIClient")
+    @patch("core.market_scanner.PricePredictor")
+    def test_safe_buy_uses_dynamic_confidence_threshold_by_price(
+        self,
+        mock_oracle_cls,
+        mock_client_cls,
+    ):
+        mock_client = mock_client_cls.return_value
+        mock_client.league = "Standard"
+        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
+        mock_client.search_items.return_value = ("query123", ["a", "b", "c"])
+        mock_client.fetch_item_details.return_value = [
+            {
+                "id": "result_low_price",
+                "listing": {
+                    "whisper": "@seller hi",
+                    "price": {"amount": 40.0, "currency": "chaos"},
+                    "account": {"name": "seller1"},
+                    "indexed": "2026-03-10T09:00:00Z",
+                },
+                "item": {
+                    "id": "item_low_price",
+                    "baseType": "Driftwood Wand",
+                    "ilvl": 80,
+                    "explicitMods": ["+# to maximum Life"],
+                    "implicitMods": [],
+                    "corrupted": False,
+                    "fractured": False,
+                    "influences": {},
+                },
+            },
+            {
+                "id": "result_mid_price",
+                "listing": {
+                    "whisper": "@seller hi",
+                    "price": {"amount": 60.0, "currency": "chaos"},
+                    "account": {"name": "seller2"},
+                    "indexed": "2026-03-10T09:00:00Z",
+                },
+                "item": {
+                    "id": "item_mid_price",
+                    "baseType": "Imbued Wand",
+                    "ilvl": 84,
+                    "explicitMods": ["+#% increased Spell Damage"],
+                    "implicitMods": [],
+                    "corrupted": False,
+                    "fractured": False,
+                    "influences": {},
+                },
+            },
+            {
+                "id": "result_high_price",
+                "listing": {
+                    "whisper": "@seller hi",
+                    "price": {"amount": 130.0, "currency": "chaos"},
+                    "account": {"name": "seller3"},
+                    "indexed": "2026-03-10T09:00:00Z",
+                },
+                "item": {
+                    "id": "item_high_price",
+                    "baseType": "Opal Ring",
+                    "ilvl": 84,
+                    "explicitMods": ["+# to all Elemental Resistances"],
+                    "implicitMods": [],
+                    "corrupted": False,
+                    "fractured": False,
+                    "influences": {},
+                },
+            },
+        ]
+
+        mock_oracle = mock_oracle_cls.return_value
+        mock_oracle.predict_value.side_effect = [
+            (80.0, 0.75),
+            (100.0, 0.79),
+            (200.0, 0.81),
+        ]
+
+        scanner = OnDemandScanner(league="Standard")
+        opportunities, stats = scanner.scan_opportunities(
+            max_items=3,
+            anti_fix=False,
+            safe_buy=True,
+        )
+
+        returned_ids = {opportunity.item_id for opportunity in opportunities}
+        assert returned_ids == {"item_low_price", "item_mid_price"}
+        assert stats.filtered_safe_buy_confidence == 1

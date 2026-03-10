@@ -132,14 +132,22 @@ def _render_scan_table(results, full=False, title=""):
 
 
 def _render_kpi_panel(stats: ScanStats):
-    table = Table(title="[bold]Resumo do Scan[/bold]", expand=True, show_header=False, box=None)
+    table = Table(
+        title="[bold]Resumo do Scan[/bold]", expand=True, show_header=False, box=None
+    )
     table.add_column("Métrica", style="cyan", justify="left")
     table.add_column("Valor", style="white", justify="right")
     table.add_row("Liga Resolvida", f"[bold]{stats.resolved_league or 'N/A'}[/bold]")
     table.add_row("Total Encontrado", f"[bold]{stats.total_found}[/bold]")
     table.add_row("Total Avaliados", f"[bold]{stats.total_evaluated}[/bold]")
     table.add_row("Descartados Anti-Fix", f"[yellow]{stats.filtered_anti_fix}[/yellow]")
-    table.add_row("Moeda Inválida", f"[yellow]{stats.skipped_invalid_currency}[/yellow]")
+    table.add_row(
+        "Descartados Preço Mínimo",
+        f"[yellow]{stats.filtered_min_listed_price}[/yellow]",
+    )
+    table.add_row(
+        "Moeda Inválida", f"[yellow]{stats.skipped_invalid_currency}[/yellow]"
+    )
     table.add_row("Lucro Médio", f"[green]{stats.avg_profit:.1f}c[/green]")
     table.add_row("Lucro Máximo", f"[bold green]{stats.max_profit:.1f}c[/bold green]")
     table.add_row("Score Médio", f"[green]{stats.avg_score:.1f}[/green]")
@@ -153,7 +161,13 @@ def _render_kpi_panel(stats: ScanStats):
     )
 
 
-def _render_no_results_message(min_profit: float, anti_fix: bool, safe_buy: bool, stats):
+def _render_no_results_message(
+    min_profit: float,
+    min_listed_price: float,
+    anti_fix: bool,
+    safe_buy: bool,
+    stats,
+):
     if not isinstance(stats, ScanStats):
         stats = ScanStats()
 
@@ -171,6 +185,10 @@ def _render_no_results_message(min_profit: float, anti_fix: bool, safe_buy: bool
     filter_reasons = []
     if min_profit > 0:
         filter_reasons.append(f"- min-profit={min_profit}c pode estar alto demais")
+    if min_listed_price > 0:
+        filter_reasons.append(
+            f"- min-listed-price={min_listed_price}c filtrou {stats.filtered_min_listed_price} itens"
+        )
     if anti_fix:
         filter_reasons.append(
             f"- anti-fix descartou {stats.filtered_anti_fix} itens suspeitos"
@@ -211,21 +229,51 @@ def _render_flip_plan(plan):
         )
 
     summary = Table.grid(padding=1)
-    summary.add_row(Text(f"Compra sugerida: {plan.opportunity.base_type} por {plan.buy_cost:.1f}c", style="bold cyan"))
-    summary.add_row(Text(f"Liga: {plan.opportunity.resolved_league} | Score: {plan.opportunity.score:.1f}", style="dim"))
-    summary.add_row(Text(f"Alvo recomendado: {plan.target.label}", style="bold magenta"))
+    summary.add_row(
+        Text(
+            f"Compra sugerida: {plan.opportunity.base_type} por {plan.buy_cost:.1f}c",
+            style="bold cyan",
+        )
+    )
+    summary.add_row(
+        Text(
+            f"Liga: {plan.opportunity.resolved_league} | Score: {plan.opportunity.score:.1f}",
+            style="dim",
+        )
+    )
+    summary.add_row(
+        Text(f"Alvo recomendado: {plan.target.label}", style="bold magenta")
+    )
     summary.add_row(Text(plan.target.rationale, style="dim"))
-    summary.add_row(Text(f"Custo esperado de craft: {plan.expected_craft_cost:.1f}c", style="yellow"))
-    summary.add_row(Text(f"Valor esperado de venda: {plan.expected_sale_value:.1f}c", style="green"))
-    summary.add_row(Text(f"Lucro esperado líquido: {plan.expected_profit:.1f}c", style="bold green"))
-    summary.add_row(Text(f"Confiança do plano: {plan.plan_confidence:.2f}", style="bold blue"))
+    summary.add_row(
+        Text(
+            f"Custo esperado de craft: {plan.expected_craft_cost:.1f}c", style="yellow"
+        )
+    )
+    summary.add_row(
+        Text(f"Valor esperado de venda: {plan.expected_sale_value:.1f}c", style="green")
+    )
+    summary.add_row(
+        Text(f"Lucro esperado líquido: {plan.expected_profit:.1f}c", style="bold green")
+    )
+    summary.add_row(
+        Text(f"Confiança do plano: {plan.plan_confidence:.2f}", style="bold blue")
+    )
     summary.add_row(Text(f"Stop-and-sell: {plan.stop_condition}", style="white"))
     if plan.risk_notes:
         summary.add_row(Text(f"Riscos: {', '.join(plan.risk_notes)}", style="red"))
     if plan.alternatives:
-        summary.add_row(Text(f"Alternativas: {' | '.join(plan.alternatives)}", style="dim"))
+        summary.add_row(
+            Text(f"Alternativas: {' | '.join(plan.alternatives)}", style="dim")
+        )
 
-    console.print(Panel(summary, border_style="magenta", title="[bold magenta]Flip Advisor[/bold magenta]"))
+    console.print(
+        Panel(
+            summary,
+            border_style="magenta",
+            title="[bold magenta]Flip Advisor[/bold magenta]",
+        )
+    )
     console.print(plan_table)
 
 
@@ -256,9 +304,16 @@ class HideoutDashboard:
         if self.calculating:
             spin = Spinner(
                 "dots",
-                text=Text("Oráculo calculando rotas no A* Optimization Engine...", style="cyan"),
+                text=Text(
+                    "Oráculo calculando rotas no A* Optimization Engine...",
+                    style="cyan",
+                ),
             )
-            return Panel(spin, title="[yellow]A-Star Pathfinding Active[/]", border_style="yellow")
+            return Panel(
+                spin,
+                title="[yellow]A-Star Pathfinding Active[/]",
+                border_style="yellow",
+            )
 
         if self.result_path is not None:
             return self._generate_results_table()
@@ -266,12 +321,19 @@ class HideoutDashboard:
         msg = Text.assemble(
             ("⚔️ Hideout Warrior v1.0\n\n", "bold bright_white"),
             ("Aguardando Ctrl+C no Path of Exile...\n", "dim"),
-            (f"Orçamento Máximo: {self.max_budget}c | Alvos: {', '.join(self.target_mods)}", "bold blue"),
+            (
+                f"Orçamento Máximo: {self.max_budget}c | Alvos: {', '.join(self.target_mods)}",
+                "bold blue",
+            ),
         )
         return Panel(Align.center(msg), border_style="bold black", padding=(2, 4))
 
     def _generate_results_table(self):
-        table = Table(title=f"Rota Ótima A* - {self.current_item.base_type}", expand=True, title_style="bold magenta")
+        table = Table(
+            title=f"Rota Ótima A* - {self.current_item.base_type}",
+            expand=True,
+            title_style="bold magenta",
+        )
         table.add_column("Passo", style="cyan", justify="center")
         table.add_column("Ação de Craft", style="white")
         table.add_column("Chance", justify="right", style="green")
@@ -290,14 +352,26 @@ class HideoutDashboard:
 
         if self.result_cost == float("inf"):
             return Panel(
-                Align.center(Text("❌ Nenhuma rota plausível encontrada dentro do orçamento!", style="bold red")),
+                Align.center(
+                    Text(
+                        "❌ Nenhuma rota plausível encontrada dentro do orçamento!",
+                        style="bold red",
+                    )
+                ),
                 border_style="red",
             )
 
         panel_group = Table.grid(padding=1)
         panel_group.add_row(table)
-        panel_group.add_row(Text(f"\nCusto EV Estimado Total: {self.result_cost:.1f} chaos", style="bold green"))
-        return Panel(panel_group, border_style="green", title="[bold green]Path Found[/]")
+        panel_group.add_row(
+            Text(
+                f"\nCusto EV Estimado Total: {self.result_cost:.1f} chaos",
+                style="bold green",
+            )
+        )
+        return Panel(
+            panel_group, border_style="green", title="[bold green]Path Found[/]"
+        )
 
     def on_item_copied(self, item: ItemState):
         self.current_item = item
@@ -306,7 +380,9 @@ class HideoutDashboard:
         self.result_cost = 0.0
         time.sleep(0.5)
         try:
-            result = self.graph_engine.find_cheapest_route(item, self.target_mods, self.max_budget)
+            result = self.graph_engine.find_cheapest_route(
+                item, self.target_mods, self.max_budget
+            )
             if result:
                 self.result_path, self.result_cost = result
             else:
@@ -321,7 +397,9 @@ class HideoutDashboard:
 @app.command()
 def craft_path(
     budget: float = typer.Option(5000.0, help="Orçamento máximo em Chaos"),
-    targets: str = typer.Option("maximum_life_1,movement_speed_1", help="Mods alvos separados por vírgula"),
+    targets: str = typer.Option(
+        "maximum_life_1,movement_speed_1", help="Mods alvos separados por vírgula"
+    ),
 ):
     """Comando legado de craft-path com clipboard, mantido apenas por compatibilidade."""
     target_mod_list = [mod.strip() for mod in targets.split(",")]
@@ -330,7 +408,9 @@ def craft_path(
 
     try:
         scanner.start()
-        with Live(dashboard.generate_layout(), refresh_per_second=4, screen=False) as live:
+        with Live(
+            dashboard.generate_layout(), refresh_per_second=4, screen=False
+        ) as live:
             while True:
                 live.update(dashboard.generate_layout())
                 time.sleep(0.2)
@@ -341,28 +421,54 @@ def craft_path(
 
 @app.command()
 def scan(
-    item_type: str = typer.Option("", "--type", help="Nome base do item (ex: 'Imbued Wand')"),
+    item_type: str = typer.Option(
+        "", "--type", help="Nome base do item (ex: 'Imbued Wand')"
+    ),
     ilvl: int = typer.Option(1, help="Item Level mínimo"),
-    rarity: str = typer.Option("rare", help="Raridade do item (ex: rare, unique, normal)"),
-    max_items: int = typer.Option(30, min=1, help="Quantidade máxima de itens para avaliar"),
-    stale_hours: float = typer.Option(48.0, min=0, help="Hora limite para listings antigos"),
+    rarity: str = typer.Option(
+        "rare", help="Raridade do item (ex: rare, unique, normal)"
+    ),
+    max_items: int = typer.Option(
+        30, min=1, help="Quantidade máxima de itens para avaliar"
+    ),
+    stale_hours: float = typer.Option(
+        48.0, min=0, help="Hora limite para listings antigos"
+    ),
     league: str = typer.Option("auto", "-l", help="Liga do Path of Exile ou 'auto'"),
     min_profit: float = typer.Option(0.0, "--min-profit", help="Lucro mínimo em Chaos"),
-    anti_fix: bool = typer.Option(True, "--anti-fix/--no-anti-fix", help="Ativar filtro anti-price-fixing"),
-    safe_buy: bool = typer.Option(False, "--safe-buy/--no-safe-buy", help="Modo conservador para compra"),
+    min_listed_price: float = typer.Option(
+        0.0,
+        "--min-listed-price",
+        min=0.0,
+        help="Preço mínimo listado (em chaos) para considerar oportunidades",
+    ),
+    anti_fix: bool = typer.Option(
+        True, "--anti-fix/--no-anti-fix", help="Ativar filtro anti-price-fixing"
+    ),
+    safe_buy: bool = typer.Option(
+        False, "--safe-buy/--no-safe-buy", help="Modo conservador para compra"
+    ),
     output: str = typer.Option("", "--output", "-o", help="Salvar saída em arquivo"),
-    full: bool = typer.Option(False, "--full", help="Tabela detalhada com colunas extras"),
-    output_format: str = typer.Option("table", "--format", help="Formato: table|json|csv|jsonl"),
+    full: bool = typer.Option(
+        False, "--full", help="Tabela detalhada com colunas extras"
+    ),
+    output_format: str = typer.Option(
+        "table", "--format", help="Formato: table|json|csv|jsonl"
+    ),
 ):
     """Scanner de arbitragem com score explícito, confiança e flags de risco."""
     from rich.status import Status
 
     valid_formats = ["table", "json", "csv", "jsonl"]
     if output_format not in valid_formats:
-        raise typer.BadParameter(f"Formato inválido: '{output_format}'. Use: {', '.join(valid_formats)}")
+        raise typer.BadParameter(
+            f"Formato inválido: '{output_format}'. Use: {', '.join(valid_formats)}"
+        )
 
     scanner = OnDemandScanner(league=league)
-    with Status("[bold cyan]Buscando oportunidades e calculando score...[/]", spinner="dots"):
+    with Status(
+        "[bold cyan]Buscando oportunidades e calculando score...[/]", spinner="dots"
+    ):
         results, stats = scanner.run_scan(
             item_class=item_type,
             ilvl_min=ilvl,
@@ -370,12 +476,19 @@ def scan(
             max_items=max_items,
             stale_hours=stale_hours,
             min_profit=min_profit,
+            min_listed_price=min_listed_price,
             anti_fix=anti_fix,
             safe_buy=safe_buy,
         )
 
     if not results:
-        _render_no_results_message(min_profit=min_profit, anti_fix=anti_fix, safe_buy=safe_buy, stats=stats)
+        _render_no_results_message(
+            min_profit=min_profit,
+            min_listed_price=min_listed_price,
+            anti_fix=anti_fix,
+            safe_buy=safe_buy,
+            stats=stats,
+        )
         return
 
     _render_kpi_panel(stats)
@@ -404,14 +517,32 @@ def flip_plan(
     item_type: str = typer.Option("", "--type", help="Limita as bases analisadas"),
     ilvl: int = typer.Option(1, help="Item level mínimo"),
     rarity: str = typer.Option("rare", help="Raridade do item"),
-    max_items: int = typer.Option(30, min=1, help="Quantidade máxima de listings avaliados"),
-    budget: float = typer.Option(150.0, min=1.0, help="Orçamento máximo de craft em chaos"),
+    max_items: int = typer.Option(
+        30, min=1, help="Quantidade máxima de listings avaliados"
+    ),
+    budget: float = typer.Option(
+        150.0, min=1.0, help="Orçamento máximo de craft em chaos"
+    ),
     top: int = typer.Option(3, min=1, max=10, help="Quantidade de planos a exibir"),
-    stale_hours: float = typer.Option(48.0, min=0, help="Hora limite para listings antigos"),
+    stale_hours: float = typer.Option(
+        48.0, min=0, help="Hora limite para listings antigos"
+    ),
     league: str = typer.Option("auto", "-l", help="Liga do Path of Exile ou 'auto'"),
-    min_profit: float = typer.Option(0.0, "--min-profit", help="Lucro mínimo da oportunidade base"),
-    anti_fix: bool = typer.Option(True, "--anti-fix/--no-anti-fix", help="Ativar filtro anti-price-fixing"),
-    safe_buy: bool = typer.Option(False, "--safe-buy/--no-safe-buy", help="Ativar filtro conservador de compra"),
+    min_profit: float = typer.Option(
+        0.0, "--min-profit", help="Lucro mínimo da oportunidade base"
+    ),
+    min_listed_price: float = typer.Option(
+        0.0,
+        "--min-listed-price",
+        min=0.0,
+        help="Preço mínimo listado (em chaos) para considerar oportunidades base",
+    ),
+    anti_fix: bool = typer.Option(
+        True, "--anti-fix/--no-anti-fix", help="Ativar filtro anti-price-fixing"
+    ),
+    safe_buy: bool = typer.Option(
+        False, "--safe-buy/--no-safe-buy", help="Ativar filtro conservador de compra"
+    ),
     output: str = typer.Option("", "--output", "-o", help="Salvar o relatório em JSON"),
     output_format: str = typer.Option("table", "--format", help="Formato: table|json"),
 ):
@@ -422,13 +553,16 @@ def flip_plan(
         raise typer.BadParameter("Formato inválido. Use 'table' ou 'json'.")
 
     advisor = FlipAdvisor(league=league)
-    with Status("[bold cyan]Procurando flips e calculando plano econômico...[/]", spinner="dots"):
+    with Status(
+        "[bold cyan]Procurando flips e calculando plano econômico...[/]", spinner="dots"
+    ):
         plans, stats = advisor.recommend_plans(
             item_class=item_type,
             ilvl_min=ilvl,
             rarity=rarity,
             max_items=max_items,
             min_profit=min_profit,
+            min_listed_price=min_listed_price,
             anti_fix=anti_fix,
             safe_buy=safe_buy,
             stale_hours=stale_hours,
@@ -437,8 +571,16 @@ def flip_plan(
         )
 
     if not plans:
-        _render_no_results_message(min_profit=min_profit, anti_fix=anti_fix, safe_buy=safe_buy, stats=stats)
-        console.print("[yellow]Nenhum flip viável coube no orçamento informado.[/yellow]")
+        _render_no_results_message(
+            min_profit=min_profit,
+            min_listed_price=min_listed_price,
+            anti_fix=anti_fix,
+            safe_buy=safe_buy,
+            stats=stats,
+        )
+        console.print(
+            "[yellow]Nenhum flip viável coube no orçamento informado.[/yellow]"
+        )
         return
 
     if output_format == "json":
@@ -450,7 +592,12 @@ def flip_plan(
             typer.echo(payload)
         return
 
-    console.print(Panel(Text(f"Liga resolvida: {stats.resolved_league}", style="bold cyan"), border_style="cyan"))
+    console.print(
+        Panel(
+            Text(f"Liga resolvida: {stats.resolved_league}", style="bold cyan"),
+            border_style="cyan",
+        )
+    )
     for plan in plans:
         _render_flip_plan(plan)
 
