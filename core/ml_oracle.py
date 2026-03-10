@@ -1,4 +1,18 @@
+from pathlib import Path
 from typing import Set, Tuple, TYPE_CHECKING
+
+import pandas as pd
+
+PRICE_ORACLE_FEATURE_SCHEMA = (
+    "is_influenced",
+    "ilvl",
+    "tier_life",
+    "tier_speed",
+    "tier_resist",
+    "tier_crit",
+    "open_affixes",
+    "meta_utility_score",
+)
 
 if TYPE_CHECKING:
     from core.graph_engine import ItemState
@@ -27,16 +41,21 @@ class PricePredictor:
         }
 
     def _load_xgboost(self):
+        model_path = self._resolve_model_path()
         try:
             import xgboost as xgb
-            import os
 
-            model_path = os.path.join("data", "price_oracle.xgb")
-            if os.path.exists(model_path):
+            if model_path.exists():
                 self.model = xgb.Booster()
-                self.model.load_model(model_path)
+                self.model.load_model(str(model_path))
         except ImportError:
             pass
+        except Exception:
+            self.model = None
+
+    def _resolve_model_path(self) -> Path:
+        project_root = Path(__file__).resolve().parents[1]
+        return project_root / "data" / "price_oracle.xgb"
 
     def _extract_features(self, item_state: "ItemState") -> list:
         """Extrai as 8 features usadas no nosso dataset de treino XGBoost."""
@@ -82,6 +101,12 @@ class PricePredictor:
             ]
         ]
 
+    def _build_inference_dataframe(self, item_state: "ItemState") -> pd.DataFrame:
+        features = self._extract_features(item_state)
+        frame = pd.DataFrame.from_records(features)
+        frame.columns = pd.Index(PRICE_ORACLE_FEATURE_SCHEMA)
+        return frame
+
     def predict_value(self, item_state: "ItemState") -> Tuple[float, float]:
         """
         Calcula o valor estimado de venda do item atual.
@@ -99,23 +124,9 @@ class PricePredictor:
 
         # -- XGBoost Inference --
         if self.model:
-            import pandas as pd
             import xgboost as xgb
 
-            features = self._extract_features(item_state)
-            df = pd.DataFrame(
-                features,
-                columns=[
-                    "is_influenced",
-                    "ilvl",
-                    "tier_life",
-                    "tier_speed",
-                    "tier_resist",
-                    "tier_crit",
-                    "open_affixes",
-                    "meta_utility_score",
-                ],
-            )
+            df = self._build_inference_dataframe(item_state)
             dmatrix = xgb.DMatrix(df)
 
             prediction = self.model.predict(dmatrix)
