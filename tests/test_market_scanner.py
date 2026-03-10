@@ -125,3 +125,40 @@ class TestMinProfitFilter:
     def test_min_profit_filter_negative(self, mock_results):
         filtered = [item for item in mock_results if item["profit"] >= -10.0]
         assert len(filtered) == 3
+
+
+class TestOpportunityScoring:
+    @pytest.fixture
+    def scanner_with_mock_rates(self, mock_ninja_currency_response):
+        with patch("core.market_scanner.MarketAPIClient"):
+            scanner = OnDemandScanner(league="Standard")
+            scanner.currency_rates = mock_ninja_currency_response
+            scanner.api_client.league = "Standard"
+            return scanner
+
+    def test_score_penalizes_risk_flags(self, scanner_with_mock_rates):
+        clean_score = scanner_with_mock_rates._compute_opportunity_score(
+            listed_price=40.0,
+            ml_value=120.0,
+            ml_confidence=0.8,
+            risk_flags=[],
+        )
+        risky_score = scanner_with_mock_rates._compute_opportunity_score(
+            listed_price=40.0,
+            ml_value=120.0,
+            ml_confidence=0.8,
+            risk_flags=["price_fix_suspected", "low_confidence"],
+        )
+        assert clean_score > risky_score
+
+    def test_build_opportunity_includes_score_and_flags(self, scanner_with_mock_rates, mock_item_detail):
+        scanner_with_mock_rates.oracle.predict_value = MagicMock(return_value=(60.0, 0.45))
+        opportunity = scanner_with_mock_rates._build_opportunity(
+            mock_item_detail,
+            query_id="abc123",
+            stale_hours=48.0,
+        )
+        assert opportunity is not None
+        assert opportunity.score >= 0
+        assert "low_confidence" in opportunity.risk_flags
+        assert opportunity.resolved_league == "Standard"

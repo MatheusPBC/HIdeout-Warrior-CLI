@@ -158,3 +158,25 @@ class TestFetchItemDetails:
         called_url = client.session.get.call_args[0][0]
         assert "?query=query-123" in called_url
         assert "&league=" not in called_url
+
+
+class TestAutoResolveTradeLeague:
+    @patch.object(MarketAPIClient, "_fetch_trade_leagues")
+    def test_auto_prefers_non_standard_trade_league(self, mock_fetch):
+        mock_fetch.return_value = ["Standard", "Necropolis", "Hardcore Necropolis"]
+
+        client = MarketAPIClient(league="auto", data_dir="/tmp/test_data")
+        client._available_leagues = mock_fetch.return_value
+        result = client._resolve_trade_league("auto")
+
+        assert result == "Necropolis"
+
+    @patch.object(MarketAPIClient, "_fetch_trade_leagues")
+    def test_auto_falls_back_to_standard_when_no_better_option(self, mock_fetch):
+        mock_fetch.return_value = ["Standard", "Hardcore", "SSF Standard"]
+
+        client = MarketAPIClient(league="auto", data_dir="/tmp/test_data")
+        client._available_leagues = mock_fetch.return_value
+        result = client._resolve_trade_league("auto")
+
+        assert result == "Standard"

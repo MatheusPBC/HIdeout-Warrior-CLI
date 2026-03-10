@@ -1,7 +1,7 @@
 import logging
-from dataclasses import dataclass, asdict, field
-from typing import List, Dict, Optional, Tuple
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from core.api_integrator import MarketAPIClient
@@ -9,6 +9,29 @@ from core.graph_engine import ItemState
 from core.ml_oracle import PricePredictor
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ListingSnapshot:
+    item_id: str
+    base_type: str
+    ilvl: int
+    listed_price: float
+    listing_currency: str
+    listing_amount: float
+    seller: str
+    indexed_at: Optional[str]
+    whisper: str
+    trade_link: str
+    trade_search_link: str
+    corrupted: bool
+    fractured: bool
+    influences: List[str] = field(default_factory=list)
+    explicit_mods: List[str] = field(default_factory=list)
+    implicit_mods: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
 @dataclass
@@ -23,72 +46,84 @@ class ScanStats:
     filtered_safe_buy_price: int = 0
     avg_profit: float = 0.0
     max_profit: float = 0.0
+    avg_score: float = 0.0
+    resolved_league: str = ""
 
 
 @dataclass
-class ScanResult:
+class ScanOpportunity:
+    item_id: str
     base_type: str
     ilvl: int
     listed_price: float
     ml_value: float
     ml_confidence: float
     profit: float
+    score: float
+    valuation_gap: float
+    relative_discount: float
     whisper: str
     trade_link: str
     trade_search_link: str
-    item_id: str
     listing_currency: str
     listing_amount: float
     seller: str
     indexed_at: Optional[str]
+    resolved_league: str
     corrupted: bool
     fractured: bool
-    influences: List[str]
-    explicit_mods: List[str]
-    implicit_mods: List[str]
+    influences: List[str] = field(default_factory=list)
+    explicit_mods: List[str] = field(default_factory=list)
+    implicit_mods: List[str] = field(default_factory=list)
+    risk_flags: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ScanResult":
+    def from_dict(cls, data: dict) -> "ScanOpportunity":
         return cls(
+            item_id=data.get("item_id", ""),
             base_type=data.get("base_type", ""),
             ilvl=data.get("ilvl", 0),
             listed_price=data.get("listed_price", 0.0),
             ml_value=data.get("ml_value", 0.0),
             ml_confidence=data.get("ml_confidence", 0.3),
             profit=data.get("profit", 0.0),
+            score=data.get("score", 0.0),
+            valuation_gap=data.get("valuation_gap", 0.0),
+            relative_discount=data.get("relative_discount", 0.0),
             whisper=data.get("whisper", ""),
             trade_link=data.get("trade_link", ""),
             trade_search_link=data.get("trade_search_link", ""),
-            item_id=data.get("item_id", ""),
             listing_currency=data.get("listing_currency", "chaos"),
             listing_amount=data.get("listing_amount", 0.0),
             seller=data.get("seller", ""),
             indexed_at=data.get("indexed_at"),
+            resolved_league=data.get("resolved_league", ""),
             corrupted=data.get("corrupted", False),
             fractured=data.get("fractured", False),
             influences=data.get("influences", []),
             explicit_mods=data.get("explicit_mods", []),
             implicit_mods=data.get("implicit_mods", []),
+            risk_flags=data.get("risk_flags", []),
         )
 
 
 class OnDemandScanner:
     """
-    Fase 7: Scanner de Mercado Sob Demanda.
-    Permite busca ativa via filtros na GGG Trade API e avalia automaticamente o "EV"
-    do item utilizando o Oráculo de Machine Learning.
+    Scanner de mercado sob demanda.
+    Busca itens na trade API, calcula valuation via ML e ranqueia oportunidades.
     """
 
-    def __init__(self, league: str = "Standard"):
+    def __init__(self, league: str = "auto"):
         self.api_client = MarketAPIClient(league=league)
         self.oracle = PricePredictor()
-
         self.currency_rates = self.api_client.sync_ninja_economy()
         logger.info(
-            f"[{league}] Scanner inicializado com {len(self.currency_rates)} taxas de moeda"
+            "[%s] Scanner inicializado com %s taxas de moeda",
+            self.api_client.league,
+            len(self.currency_rates),
         )
 
     def build_trade_query(
@@ -98,9 +133,6 @@ class OnDemandScanner:
         rarity: str = "rare",
         is_influenced: bool = False,
     ) -> dict:
-        """
-        Constrói o payload em tempo-real para o POST /api/trade/search
-        """
         query: dict = {
             "query": {
                 "status": {"option": "online"},
@@ -124,16 +156,12 @@ class OnDemandScanner:
         return query
 
     def parse_api_to_state(self, item_json: dict) -> Optional[ItemState]:
-        """
-        Transforma o payload JSON do servidor no nosso Hashable 'ItemState' nativo do A* Graph.
-        """
         item_data = item_json.get("item", {})
         if not item_data:
             return None
 
         base_type = item_data.get("baseType", "Unknown Base")
         ilvl = item_data.get("ilvl", 1)
-
         raw_mods = item_data.get("explicitMods", [])
         prefixes = set()
         suffixes = set()
@@ -144,10 +172,8 @@ class OnDemandScanner:
             else:
                 suffixes.add(mod)
 
-        is_fractured = (
-            True
-            if item_data.get("fractured", False) or item_data.get("influences", {})
-            else False
+        is_fractured = bool(
+            item_data.get("fractured", False) or item_data.get("influences", {})
         )
 
         return ItemState(
@@ -159,9 +185,6 @@ class OnDemandScanner:
         )
 
     def extract_price_chaos(self, listing_json: dict) -> Optional[float]:
-        """
-        Converte o preço de listagem do Item da conta do utilizador para a unidade padrão Chaos Orb.
-        """
         price_info = listing_json.get("price", {})
         currency = price_info.get("currency", "")
 
@@ -184,40 +207,286 @@ class OnDemandScanner:
         }
 
         ninja_key = ninja_key_map.get(currency, currency.title() + " Orb")
-
-        if ninja_key not in self.currency_rates:
-            logger.warning(f"Moeda não encontrada nas taxas: {currency} ({ninja_key})")
-            return None
-
         rate = self.currency_rates.get(ninja_key)
         if rate is None:
+            logger.warning("Moeda não encontrada nas taxas: %s (%s)", currency, ninja_key)
             return None
 
         return amount * rate
+
+    def _listing_age_hours(self, indexed_at: Optional[str]) -> Optional[float]:
+        if not indexed_at:
+            return None
+        try:
+            indexed_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return None
+        return (datetime.now(timezone.utc) - indexed_dt).total_seconds() / 3600
 
     def _is_probable_price_fix(
         self,
         listed_price_chaos: float,
         ml_value: float,
-        indexed_at: str,
+        indexed_at: Optional[str],
         stale_hours: float,
     ) -> bool:
-        """
-        Detecta prováveis tentativas de price-fixing.
-        Retorna True se o item deve ser pulado.
-        """
-        try:
-            indexed_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
-            now = datetime.now(timezone.utc)
-            age_hours = (now - indexed_dt).total_seconds() / 3600
-        except (ValueError, TypeError, AttributeError):
+        age_hours = self._listing_age_hours(indexed_at)
+        if age_hours is None:
             return False
+        return (
+            age_hours > stale_hours
+            and listed_price_chaos <= 2.0
+            and listed_price_chaos > 0
+            and (ml_value / listed_price_chaos) >= 8.0
+        )
 
-        if age_hours > stale_hours and listed_price_chaos <= 2.0:
-            if ml_value / listed_price_chaos >= 8.0:
-                return True
+    def _risk_flags(
+        self,
+        snapshot: ListingSnapshot,
+        ml_value: float,
+        ml_confidence: float,
+        stale_hours: float,
+    ) -> List[str]:
+        flags: List[str] = []
 
-        return False
+        if self._is_probable_price_fix(
+            snapshot.listed_price,
+            ml_value,
+            snapshot.indexed_at,
+            stale_hours,
+        ):
+            flags.append("price_fix_suspected")
+
+        age_hours = self._listing_age_hours(snapshot.indexed_at)
+        if age_hours is not None and age_hours > stale_hours:
+            flags.append("stale_listing")
+
+        if ml_confidence < 0.5:
+            flags.append("low_confidence")
+
+        if snapshot.listed_price < 5:
+            flags.append("cheap_listing")
+
+        if snapshot.corrupted:
+            flags.append("corrupted")
+
+        if snapshot.fractured:
+            flags.append("fractured")
+
+        if snapshot.influences:
+            flags.append("influenced")
+
+        return flags
+
+    def _compute_opportunity_score(
+        self,
+        listed_price: float,
+        ml_value: float,
+        ml_confidence: float,
+        risk_flags: List[str],
+    ) -> float:
+        if listed_price <= 0:
+            return 0.0
+
+        profit = ml_value - listed_price
+        relative_discount = max(profit / max(listed_price, 1.0), 0.0)
+
+        score = 0.0
+        score += max(profit, 0.0) * 0.45
+        score += min(relative_discount, 5.0) * 12.0
+        score += ml_confidence * 35.0
+
+        penalties = {
+            "price_fix_suspected": 45.0,
+            "stale_listing": 8.0,
+            "low_confidence": 10.0,
+            "cheap_listing": 4.0,
+            "corrupted": 6.0,
+        }
+        score -= sum(penalties.get(flag, 0.0) for flag in risk_flags)
+        return round(max(score, 0.0), 1)
+
+    def _build_listing_snapshot(self, item_json: dict, query_id: str) -> Optional[ListingSnapshot]:
+        listing = item_json.get("listing", {})
+        item_data = item_json.get("item", {})
+        whisper = listing.get("whisper", "")
+        if not whisper:
+            return None
+
+        listed_price = self.extract_price_chaos(listing)
+        if listed_price is None:
+            return None
+
+        price_info = listing.get("price", {})
+        item_id = item_data.get("id", "")
+        league_encoded = quote(self.api_client.league, safe="")
+        search_link = (
+            f"https://www.pathofexile.com/trade/search/{league_encoded}/{query_id}"
+        )
+        trade_link = f"{search_link}#{item_id}" if item_id else search_link
+        influences_dict = item_data.get("influences", {}) or {}
+
+        return ListingSnapshot(
+            item_id=item_id,
+            base_type=item_data.get("baseType", "Unknown Base"),
+            ilvl=item_data.get("ilvl", 1),
+            listed_price=round(listed_price, 1),
+            listing_currency=price_info.get("currency", "chaos"),
+            listing_amount=float(price_info.get("amount", 0.0) or 0.0),
+            seller=listing.get("account", {}).get("name", ""),
+            indexed_at=listing.get("indexed") or None,
+            whisper=whisper,
+            trade_link=trade_link,
+            trade_search_link=search_link,
+            corrupted=bool(item_data.get("corrupted", False)),
+            fractured=bool(item_data.get("fractured", False)),
+            influences=list(influences_dict.keys()),
+            explicit_mods=item_data.get("explicitMods", []),
+            implicit_mods=item_data.get("implicitMods", []),
+        )
+
+    def _build_opportunity(
+        self,
+        item_json: dict,
+        query_id: str,
+        stale_hours: float,
+    ) -> Optional[ScanOpportunity]:
+        snapshot = self._build_listing_snapshot(item_json, query_id)
+        if snapshot is None:
+            return None
+
+        state = self.parse_api_to_state(item_json)
+        if not state:
+            return None
+
+        ml_value, ml_confidence = self.oracle.predict_value(state)
+        valuation_gap = round(ml_value - snapshot.listed_price, 1)
+        relative_discount = round(valuation_gap / max(snapshot.listed_price, 1.0), 2)
+        risk_flags = self._risk_flags(snapshot, ml_value, ml_confidence, stale_hours)
+        score = self._compute_opportunity_score(
+            snapshot.listed_price,
+            ml_value,
+            ml_confidence,
+            risk_flags,
+        )
+
+        return ScanOpportunity(
+            item_id=snapshot.item_id,
+            base_type=snapshot.base_type,
+            ilvl=snapshot.ilvl,
+            listed_price=snapshot.listed_price,
+            ml_value=round(ml_value, 1),
+            ml_confidence=round(ml_confidence, 2),
+            profit=valuation_gap,
+            score=score,
+            valuation_gap=valuation_gap,
+            relative_discount=relative_discount,
+            whisper=snapshot.whisper,
+            trade_link=snapshot.trade_link,
+            trade_search_link=snapshot.trade_search_link,
+            listing_currency=snapshot.listing_currency,
+            listing_amount=snapshot.listing_amount,
+            seller=snapshot.seller,
+            indexed_at=snapshot.indexed_at,
+            resolved_league=self.api_client.league,
+            corrupted=snapshot.corrupted,
+            fractured=snapshot.fractured,
+            influences=snapshot.influences,
+            explicit_mods=snapshot.explicit_mods,
+            implicit_mods=snapshot.implicit_mods,
+            risk_flags=risk_flags,
+        )
+
+    def scan_opportunities(
+        self,
+        item_class: str = "",
+        ilvl_min: int = 1,
+        rarity: str = "rare",
+        max_items: int = 30,
+        min_profit: float = float("-inf"),
+        anti_fix: bool = True,
+        stale_hours: float = 48.0,
+        safe_buy: bool = False,
+    ) -> Tuple[List[ScanOpportunity], ScanStats]:
+        if max_items <= 0:
+            return [], ScanStats(resolved_league=self.api_client.league)
+
+        query = self.build_trade_query(item_class, ilvl_min, rarity, False)
+        query_id, result_ids = self.api_client.search_items(query)
+        if not query_id or not result_ids:
+            return [], ScanStats(resolved_league=self.api_client.league)
+
+        target_ids = result_ids[: min(max_items, len(result_ids))]
+        opportunities: List[ScanOpportunity] = []
+        total_evaluated = 0
+        filtered_anti_fix = 0
+        filtered_min_profit = 0
+        skipped_invalid_currency = 0
+        filtered_safe_buy_confidence = 0
+        filtered_safe_buy_age = 0
+        filtered_safe_buy_price = 0
+
+        for i in range(0, len(target_ids), 10):
+            details = self.api_client.fetch_item_details(target_ids[i : i + 10], query_id)
+            for item_json in details:
+                listing = item_json.get("listing", {})
+                if not listing.get("whisper"):
+                    continue
+
+                if self.extract_price_chaos(listing) is None:
+                    skipped_invalid_currency += 1
+                    continue
+
+                opportunity = self._build_opportunity(item_json, query_id, stale_hours)
+                if opportunity is None:
+                    continue
+
+                total_evaluated += 1
+
+                if anti_fix and "price_fix_suspected" in opportunity.risk_flags:
+                    filtered_anti_fix += 1
+                    continue
+
+                if safe_buy:
+                    if opportunity.ml_confidence < 0.7:
+                        filtered_safe_buy_confidence += 1
+                        continue
+                    age_hours = self._listing_age_hours(opportunity.indexed_at)
+                    if age_hours is not None and age_hours > 24:
+                        filtered_safe_buy_age += 1
+                        continue
+                    if opportunity.listed_price < 5:
+                        filtered_safe_buy_price += 1
+                        continue
+
+                if min_profit > float("-inf") and opportunity.profit < min_profit:
+                    filtered_min_profit += 1
+                    continue
+
+                opportunities.append(opportunity)
+
+        opportunities.sort(key=lambda opp: (opp.score, opp.profit), reverse=True)
+
+        stats = ScanStats(
+            total_found=len(result_ids),
+            total_evaluated=total_evaluated,
+            filtered_anti_fix=filtered_anti_fix,
+            filtered_min_profit=filtered_min_profit,
+            skipped_invalid_currency=skipped_invalid_currency,
+            filtered_safe_buy_confidence=filtered_safe_buy_confidence,
+            filtered_safe_buy_age=filtered_safe_buy_age,
+            filtered_safe_buy_price=filtered_safe_buy_price,
+            avg_profit=round(sum(o.profit for o in opportunities) / len(opportunities), 1)
+            if opportunities
+            else 0.0,
+            max_profit=max((o.profit for o in opportunities), default=0.0),
+            avg_score=round(sum(o.score for o in opportunities) / len(opportunities), 1)
+            if opportunities
+            else 0.0,
+            resolved_league=self.api_client.league,
+        )
+
+        return opportunities, stats
 
     def run_scan(
         self,
@@ -230,179 +499,14 @@ class OnDemandScanner:
         stale_hours: float = 48.0,
         safe_buy: bool = False,
     ) -> Tuple[List[Dict], ScanStats]:
-        """
-        Executa uma pesquisa on-demand. Avalia listagens com a IA, e retorna Arbitragens Livres (Profit > 0).
-        Retorna: Tupla (results, stats) onde results é lista de dicionários e stats é ScanStats.
-        Mantém compatibilidade com CLI retornando dicionários via to_dict().
-        """
-        if max_items <= 0:
-            return [], ScanStats()
-
-        logger.info(
-            f"[{self.api_client.league}] Iniciando scan: item_class={item_class}, "
-            f"max_items={max_items}, min_profit={min_profit}, anti_fix={anti_fix}"
+        opportunities, stats = self.scan_opportunities(
+            item_class=item_class,
+            ilvl_min=ilvl_min,
+            rarity=rarity,
+            max_items=max_items,
+            min_profit=min_profit,
+            anti_fix=anti_fix,
+            stale_hours=stale_hours,
+            safe_buy=safe_buy,
         )
-
-        query = self.build_trade_query(item_class, ilvl_min, rarity, False)
-
-        query_id, result_ids = self.api_client.search_items(query)
-        if not query_id or not result_ids:
-            logger.warning(
-                f"[{self.api_client.league}] Nenhum resultado encontrado para a query"
-            )
-            return [], ScanStats()
-
-        league_encoded = quote(self.api_client.league, safe="")
-
-        process_limit = min(max_items, len(result_ids))
-        target_ids = result_ids[:process_limit]
-
-        scan_results: List[ScanResult] = []
-        batch_size = 10
-
-        filtered_anti_fix = 0
-        filtered_min_profit = 0
-        skipped_invalid_currency = 0
-        filtered_safe_buy_confidence = 0
-        filtered_safe_buy_age = 0
-        filtered_safe_buy_price = 0
-        total_evaluated = 0
-
-        for i in range(0, len(target_ids), batch_size):
-            batch = target_ids[i : i + batch_size]
-            details = self.api_client.fetch_item_details(batch, query_id)
-
-            for item_json in details:
-                listing = item_json.get("listing", {})
-                whisper = listing.get("whisper", "")
-                if not whisper:
-                    continue
-
-                listed_price_chaos = self.extract_price_chaos(listing)
-                if listed_price_chaos is None:
-                    skipped_invalid_currency += 1
-                    continue
-
-                assert listed_price_chaos is not None, (
-                    "listed_price_chaos should not be None here"
-                )
-
-                price_info = listing.get("price", {})
-                listing_currency = price_info.get("currency", "chaos")
-                listing_amount = price_info.get("amount", 0.0)
-
-                item_data = item_json.get("item", {})
-                item_id = item_data.get("id", "")
-                indexed_at = listing.get("indexed", "")
-
-                state = self.parse_api_to_state(item_json)
-                if not state:
-                    continue
-
-                ml_value, ml_confidence = self.oracle.predict_value(state)
-                total_evaluated += 1
-
-                if anti_fix:
-                    if self._is_probable_price_fix(
-                        listed_price_chaos, ml_value, indexed_at, stale_hours
-                    ):
-                        filtered_anti_fix += 1
-                        continue
-
-                if safe_buy:
-                    if ml_confidence < 0.7:
-                        filtered_safe_buy_confidence += 1
-                        continue
-
-                    try:
-                        indexed_dt = datetime.fromisoformat(
-                            indexed_at.replace("Z", "+00:00")
-                        )
-                        now = datetime.now(timezone.utc)
-                        age_hours = (now - indexed_dt).total_seconds() / 3600
-                        if age_hours > 24:
-                            filtered_safe_buy_age += 1
-                            continue
-                    except (ValueError, TypeError, AttributeError):
-                        pass
-
-                    if listed_price_chaos < 5:
-                        filtered_safe_buy_price += 1
-                        continue
-
-                profit = ml_value - listed_price_chaos
-
-                if min_profit > float("-inf") and profit < min_profit:
-                    filtered_min_profit += 1
-                    continue
-
-                explicit_mods = item_data.get("explicitMods", [])
-                implicit_mods = item_data.get("implicitMods", [])
-                corrupted = item_data.get("corrupted", False)
-                fractured = item_data.get("fractured", False)
-                influences_dict = item_data.get("influences", {})
-                influences = list(influences_dict.keys()) if influences_dict else []
-
-                search_link = f"https://www.pathofexile.com/trade/search/{league_encoded}/{query_id}"
-                trade_link = f"{search_link}#{item_id}"
-
-                scan_result = ScanResult(
-                    base_type=state.base_type,
-                    ilvl=state.ilvl,
-                    listed_price=round(listed_price_chaos, 1),
-                    ml_value=round(ml_value, 1),
-                    ml_confidence=round(ml_confidence, 2),
-                    profit=round(profit, 1),
-                    whisper=whisper,
-                    trade_link=trade_link,
-                    trade_search_link=search_link,
-                    item_id=item_id,
-                    listing_currency=listing_currency,
-                    listing_amount=listing_amount,
-                    seller=listing.get("account", {}).get("name", ""),
-                    indexed_at=indexed_at if indexed_at else None,
-                    corrupted=corrupted,
-                    fractured=fractured,
-                    influences=influences,
-                    explicit_mods=explicit_mods,
-                    implicit_mods=implicit_mods,
-                )
-                scan_results.append(scan_result)
-
-        scan_results.sort(key=lambda x: x.profit, reverse=True)
-
-        stats = ScanStats(
-            total_found=len(result_ids),
-            total_evaluated=total_evaluated,
-            filtered_anti_fix=filtered_anti_fix,
-            filtered_min_profit=filtered_min_profit,
-            skipped_invalid_currency=skipped_invalid_currency,
-            filtered_safe_buy_confidence=filtered_safe_buy_confidence,
-            filtered_safe_buy_age=filtered_safe_buy_age,
-            filtered_safe_buy_price=filtered_safe_buy_price,
-            avg_profit=round(sum(r.profit for r in scan_results) / len(scan_results), 1)
-            if scan_results
-            else 0.0,
-            max_profit=max((r.profit for r in scan_results), default=0.0),
-        )
-
-        if filtered_anti_fix > 0:
-            logger.info(
-                f"[{self.api_client.league}] Itens filtrados por anti-fix: {filtered_anti_fix}"
-            )
-
-        if min_profit > float("-inf") and filtered_min_profit > 0:
-            logger.info(
-                f"[{self.api_client.league}] Itens filtrados por min-profit: {filtered_min_profit}"
-            )
-
-        if skipped_invalid_currency > 0:
-            logger.warning(
-                f"[{self.api_client.league}] Itens pulados por conversão de moeda inválida: {skipped_invalid_currency}"
-            )
-
-        logger.info(
-            f"[{self.api_client.league}] Scan completado: {len(scan_results)} resultados encontrados"
-        )
-
-        return [result.to_dict() for result in scan_results], stats
+        return [opportunity.to_dict() for opportunity in opportunities], stats
