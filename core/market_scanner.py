@@ -1,25 +1,130 @@
-from typing import Any, Dict, List, Optional
-import math
+import logging
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from core.api_integrator import MarketAPIClient
 from core.graph_engine import ItemState
 from core.ml_oracle import PricePredictor
 
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ListingSnapshot:
+    item_id: str
+    base_type: str
+    ilvl: int
+    listed_price: float
+    listing_currency: str
+    listing_amount: float
+    seller: str
+    indexed_at: Optional[str]
+    whisper: str
+    trade_link: str
+    trade_search_link: str
+    corrupted: bool
+    fractured: bool
+    influences: List[str] = field(default_factory=list)
+    explicit_mods: List[str] = field(default_factory=list)
+    implicit_mods: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ScanStats:
+    total_found: int = 0
+    total_evaluated: int = 0
+    filtered_anti_fix: int = 0
+    filtered_min_profit: int = 0
+    skipped_invalid_currency: int = 0
+    filtered_safe_buy_confidence: int = 0
+    filtered_safe_buy_age: int = 0
+    filtered_safe_buy_price: int = 0
+    avg_profit: float = 0.0
+    max_profit: float = 0.0
+    avg_score: float = 0.0
+    resolved_league: str = ""
+
+
+@dataclass
+class ScanOpportunity:
+    item_id: str
+    base_type: str
+    ilvl: int
+    listed_price: float
+    ml_value: float
+    ml_confidence: float
+    profit: float
+    score: float
+    valuation_gap: float
+    relative_discount: float
+    whisper: str
+    trade_link: str
+    trade_search_link: str
+    listing_currency: str
+    listing_amount: float
+    seller: str
+    indexed_at: Optional[str]
+    resolved_league: str
+    corrupted: bool
+    fractured: bool
+    influences: List[str] = field(default_factory=list)
+    explicit_mods: List[str] = field(default_factory=list)
+    implicit_mods: List[str] = field(default_factory=list)
+    risk_flags: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ScanOpportunity":
+        return cls(
+            item_id=data.get("item_id", ""),
+            base_type=data.get("base_type", ""),
+            ilvl=data.get("ilvl", 0),
+            listed_price=data.get("listed_price", 0.0),
+            ml_value=data.get("ml_value", 0.0),
+            ml_confidence=data.get("ml_confidence", 0.3),
+            profit=data.get("profit", 0.0),
+            score=data.get("score", 0.0),
+            valuation_gap=data.get("valuation_gap", 0.0),
+            relative_discount=data.get("relative_discount", 0.0),
+            whisper=data.get("whisper", ""),
+            trade_link=data.get("trade_link", ""),
+            trade_search_link=data.get("trade_search_link", ""),
+            listing_currency=data.get("listing_currency", "chaos"),
+            listing_amount=data.get("listing_amount", 0.0),
+            seller=data.get("seller", ""),
+            indexed_at=data.get("indexed_at"),
+            resolved_league=data.get("resolved_league", ""),
+            corrupted=data.get("corrupted", False),
+            fractured=data.get("fractured", False),
+            influences=data.get("influences", []),
+            explicit_mods=data.get("explicit_mods", []),
+            implicit_mods=data.get("implicit_mods", []),
+            risk_flags=data.get("risk_flags", []),
+        )
+
 
 class OnDemandScanner:
     """
-    Fase 7: Scanner de Mercado Sob Demanda.
-    Permite busca ativa via filtros na GGG Trade API e avalia automaticamente o "EV"
-    do item utilizando o Oráculo de Machine Learning.
+    Scanner de mercado sob demanda.
+    Busca itens na trade API, calcula valuation via ML e ranqueia oportunidades.
     """
 
-    def __init__(self, league: str = "Standard"):
+    def __init__(self, league: str = "auto"):
         self.api_client = MarketAPIClient(league=league)
         self.oracle = PricePredictor()
-
-        # Puxamos as taxas atuais do ninja para conversões Chaos <-> Divine na Arbitragem
         self.currency_rates = self.api_client.sync_ninja_economy()
+        logger.info(
+            "[%s] Scanner inicializado com %s taxas de moeda",
+            self.api_client.league,
+            len(self.currency_rates),
+        )
 
     def build_trade_query(
         self,
@@ -28,18 +133,11 @@ class OnDemandScanner:
         rarity: str = "rare",
         is_influenced: bool = False,
     ) -> dict:
-        """
-        Constrói o payload em tempo-real para o POST /api/trade/search
-        """
         query: dict = {
             "query": {
                 "status": {"option": "online"},
                 "filters": {
-                    "trade_filters": {
-                        "filters": {
-                            "price": {"min": 1}  # Item precisa de Buyout Listado
-                        }
-                    },
+                    "trade_filters": {"filters": {"price": {"min": 1}}},
                     "type_filters": {"filters": {"rarity": {"option": rarity}}},
                     "misc_filters": {"filters": {"ilvl": {"min": ilvl_min}}},
                 },
@@ -47,12 +145,10 @@ class OnDemandScanner:
             "sort": {"price": "asc"},
         }
 
-        # Match de tipo opcional
         if item_class:
             query["query"]["type"] = item_class
 
         if is_influenced:
-            # Filtro psuedo de influencer, qualquer influencer.
             query["query"]["filters"]["misc_filters"]["filters"]["influence"] = {
                 "option": "true"
             }
@@ -60,35 +156,24 @@ class OnDemandScanner:
         return query
 
     def parse_api_to_state(self, item_json: dict) -> Optional[ItemState]:
-        """
-        Transforma o payload JSON do servidor no nosso Hashable 'ItemState' nativo do A* Graph.
-        """
         item_data = item_json.get("item", {})
         if not item_data:
             return None
 
         base_type = item_data.get("baseType", "Unknown Base")
         ilvl = item_data.get("ilvl", 1)
-
-        # Simplificação: No PoE JSON explicit mods formatados já contêm o nome.
-        # Precisamos parseá-los para a representação do Graph.
         raw_mods = item_data.get("explicitMods", [])
         prefixes = set()
         suffixes = set()
 
-        # Distinção entre prefixo e sufixo é falha na API crua sem cross-reference,
-        # vamos usar o total de affixes para feature eng do XGBoost de forma cega para este MVP.
-        # Numa DAG real buscaríamos no RePoe se cada mod listado é P ou S.
         for i, mod in enumerate(raw_mods):
             if i % 2 == 0:
                 prefixes.add(mod)
             else:
                 suffixes.add(mod)
 
-        is_fractured = (
-            True
-            if item_data.get("fractured", False) or item_data.get("influences", {})
-            else False
+        is_fractured = bool(
+            item_data.get("fractured", False) or item_data.get("influences", {})
         )
 
         return ItemState(
@@ -100,16 +185,12 @@ class OnDemandScanner:
         )
 
     def extract_price_chaos(self, listing_json: dict) -> Optional[float]:
-        """
-        Converte o preço de listagem do Item da conta do utilizador para a unidade padrão Chaos Orb.
-        """
         price_info = listing_json.get("price", {})
-        currency = str(price_info.get("currency", "")).lower()
-        amount_raw = price_info.get("amount", 0.0)
+        currency = price_info.get("currency", "")
 
         try:
-            amount = float(amount_raw)
-        except (TypeError, ValueError):
+            amount = float(price_info.get("amount", 0.0))
+        except (ValueError, TypeError):
             return None
 
         if amount <= 0:
@@ -118,7 +199,6 @@ class OnDemandScanner:
         if currency == "chaos":
             return amount
 
-        # Padrão GGG Trade para Poe.Ninja (Semântica)
         ninja_key_map = {
             "divine": "Divine Orb",
             "exalted": "Exalted Orb",
@@ -127,81 +207,286 @@ class OnDemandScanner:
         }
 
         ninja_key = ninja_key_map.get(currency, currency.title() + " Orb")
-        if ninja_key in self.currency_rates:
-            rate = self.currency_rates.get(ninja_key, 0.0)
-            if isinstance(rate, (int, float)) and rate > 0:
-                return amount * float(rate)
+        rate = self.currency_rates.get(ninja_key)
+        if rate is None:
+            logger.warning("Moeda não encontrada nas taxas: %s (%s)", currency, ninja_key)
+            return None
 
-        # Fallbacks em caso de indisponibilidade ninja
-        if currency == "divine":
-            return amount * 125.0
+        return amount * rate
 
-        # Se não conseguimos converter, é mais seguro ignorar o item
-        return None
-
-    @staticmethod
-    def _parse_indexed_at(indexed_at: Any) -> Optional[datetime]:
+    def _listing_age_hours(self, indexed_at: Optional[str]) -> Optional[float]:
         if not indexed_at:
             return None
-
-        value = str(indexed_at).strip()
-        if not value:
-            return None
-
-        if value.endswith("Z"):
-            value = value[:-1] + "+00:00"
-
         try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
+            indexed_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
             return None
-
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-
-        return parsed
+        return (datetime.now(timezone.utc) - indexed_dt).total_seconds() / 3600
 
     def _is_probable_price_fix(
         self,
         listed_price_chaos: float,
         ml_value: float,
-        indexed_at: Any,
-        stale_hours: float = 48.0,
+        indexed_at: Optional[str],
+        stale_hours: float,
     ) -> bool:
-        """
-        Heurística anti-price-fixing para filtrar listagens antigas e implausivelmente baratas.
-        """
-        parsed = self._parse_indexed_at(indexed_at)
-        if parsed is None:
+        age_hours = self._listing_age_hours(indexed_at)
+        if age_hours is None:
             return False
+        return (
+            age_hours > stale_hours
+            and listed_price_chaos <= 2.0
+            and listed_price_chaos > 0
+            and (ml_value / listed_price_chaos) >= 8.0
+        )
 
-        age_hours = (datetime.now(timezone.utc) - parsed).total_seconds() / 3600.0
-        if age_hours < stale_hours:
-            return False
+    def _risk_flags(
+        self,
+        snapshot: ListingSnapshot,
+        ml_value: float,
+        ml_confidence: float,
+        stale_hours: float,
+    ) -> List[str]:
+        flags: List[str] = []
 
-        if listed_price_chaos <= 0:
-            return True
+        if self._is_probable_price_fix(
+            snapshot.listed_price,
+            ml_value,
+            snapshot.indexed_at,
+            stale_hours,
+        ):
+            flags.append("price_fix_suspected")
 
-        profit = ml_value - listed_price_chaos
-        spread_ratio = ml_value / max(listed_price_chaos, 0.1)
+        age_hours = self._listing_age_hours(snapshot.indexed_at)
+        if age_hours is not None and age_hours > stale_hours:
+            flags.append("stale_listing")
 
-        is_very_cheap = listed_price_chaos <= 2.0
-        is_suspicious_spread = profit >= 10.0 or spread_ratio >= 8.0
-        return is_very_cheap and is_suspicious_spread
+        if ml_confidence < 0.5:
+            flags.append("low_confidence")
 
-    @staticmethod
-    def extract_influences(item_data: Dict[str, Any]) -> List[str]:
-        influences_raw = item_data.get("influences")
-        if not influences_raw:
-            return []
+        if snapshot.listed_price < 5:
+            flags.append("cheap_listing")
 
-        if isinstance(influences_raw, dict):
-            return [name for name, enabled in influences_raw.items() if bool(enabled)]
+        if snapshot.corrupted:
+            flags.append("corrupted")
 
-        if isinstance(influences_raw, list):
-            return [str(value) for value in influences_raw]
+        if snapshot.fractured:
+            flags.append("fractured")
 
-        return [str(influences_raw)]
+        if snapshot.influences:
+            flags.append("influenced")
+
+        return flags
+
+    def _compute_opportunity_score(
+        self,
+        listed_price: float,
+        ml_value: float,
+        ml_confidence: float,
+        risk_flags: List[str],
+    ) -> float:
+        if listed_price <= 0:
+            return 0.0
+
+        profit = ml_value - listed_price
+        relative_discount = max(profit / max(listed_price, 1.0), 0.0)
+
+        score = 0.0
+        score += max(profit, 0.0) * 0.45
+        score += min(relative_discount, 5.0) * 12.0
+        score += ml_confidence * 35.0
+
+        penalties = {
+            "price_fix_suspected": 45.0,
+            "stale_listing": 8.0,
+            "low_confidence": 10.0,
+            "cheap_listing": 4.0,
+            "corrupted": 6.0,
+        }
+        score -= sum(penalties.get(flag, 0.0) for flag in risk_flags)
+        return round(max(score, 0.0), 1)
+
+    def _build_listing_snapshot(self, item_json: dict, query_id: str) -> Optional[ListingSnapshot]:
+        listing = item_json.get("listing", {})
+        item_data = item_json.get("item", {})
+        whisper = listing.get("whisper", "")
+        if not whisper:
+            return None
+
+        listed_price = self.extract_price_chaos(listing)
+        if listed_price is None:
+            return None
+
+        price_info = listing.get("price", {})
+        item_id = item_data.get("id", "")
+        league_encoded = quote(self.api_client.league, safe="")
+        search_link = (
+            f"https://www.pathofexile.com/trade/search/{league_encoded}/{query_id}"
+        )
+        trade_link = f"{search_link}#{item_id}" if item_id else search_link
+        influences_dict = item_data.get("influences", {}) or {}
+
+        return ListingSnapshot(
+            item_id=item_id,
+            base_type=item_data.get("baseType", "Unknown Base"),
+            ilvl=item_data.get("ilvl", 1),
+            listed_price=round(listed_price, 1),
+            listing_currency=price_info.get("currency", "chaos"),
+            listing_amount=float(price_info.get("amount", 0.0) or 0.0),
+            seller=listing.get("account", {}).get("name", ""),
+            indexed_at=listing.get("indexed") or None,
+            whisper=whisper,
+            trade_link=trade_link,
+            trade_search_link=search_link,
+            corrupted=bool(item_data.get("corrupted", False)),
+            fractured=bool(item_data.get("fractured", False)),
+            influences=list(influences_dict.keys()),
+            explicit_mods=item_data.get("explicitMods", []),
+            implicit_mods=item_data.get("implicitMods", []),
+        )
+
+    def _build_opportunity(
+        self,
+        item_json: dict,
+        query_id: str,
+        stale_hours: float,
+    ) -> Optional[ScanOpportunity]:
+        snapshot = self._build_listing_snapshot(item_json, query_id)
+        if snapshot is None:
+            return None
+
+        state = self.parse_api_to_state(item_json)
+        if not state:
+            return None
+
+        ml_value, ml_confidence = self.oracle.predict_value(state)
+        valuation_gap = round(ml_value - snapshot.listed_price, 1)
+        relative_discount = round(valuation_gap / max(snapshot.listed_price, 1.0), 2)
+        risk_flags = self._risk_flags(snapshot, ml_value, ml_confidence, stale_hours)
+        score = self._compute_opportunity_score(
+            snapshot.listed_price,
+            ml_value,
+            ml_confidence,
+            risk_flags,
+        )
+
+        return ScanOpportunity(
+            item_id=snapshot.item_id,
+            base_type=snapshot.base_type,
+            ilvl=snapshot.ilvl,
+            listed_price=snapshot.listed_price,
+            ml_value=round(ml_value, 1),
+            ml_confidence=round(ml_confidence, 2),
+            profit=valuation_gap,
+            score=score,
+            valuation_gap=valuation_gap,
+            relative_discount=relative_discount,
+            whisper=snapshot.whisper,
+            trade_link=snapshot.trade_link,
+            trade_search_link=snapshot.trade_search_link,
+            listing_currency=snapshot.listing_currency,
+            listing_amount=snapshot.listing_amount,
+            seller=snapshot.seller,
+            indexed_at=snapshot.indexed_at,
+            resolved_league=self.api_client.league,
+            corrupted=snapshot.corrupted,
+            fractured=snapshot.fractured,
+            influences=snapshot.influences,
+            explicit_mods=snapshot.explicit_mods,
+            implicit_mods=snapshot.implicit_mods,
+            risk_flags=risk_flags,
+        )
+
+    def scan_opportunities(
+        self,
+        item_class: str = "",
+        ilvl_min: int = 1,
+        rarity: str = "rare",
+        max_items: int = 30,
+        min_profit: float = float("-inf"),
+        anti_fix: bool = True,
+        stale_hours: float = 48.0,
+        safe_buy: bool = False,
+    ) -> Tuple[List[ScanOpportunity], ScanStats]:
+        if max_items <= 0:
+            return [], ScanStats(resolved_league=self.api_client.league)
+
+        query = self.build_trade_query(item_class, ilvl_min, rarity, False)
+        query_id, result_ids = self.api_client.search_items(query)
+        if not query_id or not result_ids:
+            return [], ScanStats(resolved_league=self.api_client.league)
+
+        target_ids = result_ids[: min(max_items, len(result_ids))]
+        opportunities: List[ScanOpportunity] = []
+        total_evaluated = 0
+        filtered_anti_fix = 0
+        filtered_min_profit = 0
+        skipped_invalid_currency = 0
+        filtered_safe_buy_confidence = 0
+        filtered_safe_buy_age = 0
+        filtered_safe_buy_price = 0
+
+        for i in range(0, len(target_ids), 10):
+            details = self.api_client.fetch_item_details(target_ids[i : i + 10], query_id)
+            for item_json in details:
+                listing = item_json.get("listing", {})
+                if not listing.get("whisper"):
+                    continue
+
+                if self.extract_price_chaos(listing) is None:
+                    skipped_invalid_currency += 1
+                    continue
+
+                opportunity = self._build_opportunity(item_json, query_id, stale_hours)
+                if opportunity is None:
+                    continue
+
+                total_evaluated += 1
+
+                if anti_fix and "price_fix_suspected" in opportunity.risk_flags:
+                    filtered_anti_fix += 1
+                    continue
+
+                if safe_buy:
+                    if opportunity.ml_confidence < 0.7:
+                        filtered_safe_buy_confidence += 1
+                        continue
+                    age_hours = self._listing_age_hours(opportunity.indexed_at)
+                    if age_hours is not None and age_hours > 24:
+                        filtered_safe_buy_age += 1
+                        continue
+                    if opportunity.listed_price < 5:
+                        filtered_safe_buy_price += 1
+                        continue
+
+                if min_profit > float("-inf") and opportunity.profit < min_profit:
+                    filtered_min_profit += 1
+                    continue
+
+                opportunities.append(opportunity)
+
+        opportunities.sort(key=lambda opp: (opp.score, opp.profit), reverse=True)
+
+        stats = ScanStats(
+            total_found=len(result_ids),
+            total_evaluated=total_evaluated,
+            filtered_anti_fix=filtered_anti_fix,
+            filtered_min_profit=filtered_min_profit,
+            skipped_invalid_currency=skipped_invalid_currency,
+            filtered_safe_buy_confidence=filtered_safe_buy_confidence,
+            filtered_safe_buy_age=filtered_safe_buy_age,
+            filtered_safe_buy_price=filtered_safe_buy_price,
+            avg_profit=round(sum(o.profit for o in opportunities) / len(opportunities), 1)
+            if opportunities
+            else 0.0,
+            max_profit=max((o.profit for o in opportunities), default=0.0),
+            avg_score=round(sum(o.score for o in opportunities) / len(opportunities), 1)
+            if opportunities
+            else 0.0,
+            resolved_league=self.api_client.league,
+        )
+
+        return opportunities, stats
 
     def run_scan(
         self,
@@ -212,123 +497,16 @@ class OnDemandScanner:
         min_profit: float = float("-inf"),
         anti_fix: bool = True,
         stale_hours: float = 48.0,
-    ) -> List[Dict]:
-        """
-        Executa uma pesquisa on-demand. Avalia listagens com a IA, e retorna Arbitragens Livres (Profit > 0).
-        Retorna: Lista de Dicts [{base, listed_price, ml_value, profit, whisper}] ordenada por Profit DESC.
-        """
-        query = self.build_trade_query(item_class, ilvl_min, rarity, False)
-
-        query_id, result_ids = self.api_client.search_items(query)
-        if not query_id or not result_ids:
-            return []
-
-        # Paginação controlada e respeitosa
-        process_limit = min(max_items, len(result_ids))
-        target_ids = result_ids[:process_limit]
-
-        evaluated_items = []
-        batch_size = 10
-
-        for i in range(0, len(target_ids), batch_size):
-            batch = target_ids[i : i + batch_size]
-            details = self.api_client.fetch_item_details(batch, query_id)
-
-            for item_json in details:
-                listing = item_json.get("listing", {})
-                item_data = item_json.get("item", {})
-                whisper = str(listing.get("whisper", ""))
-                if not whisper:
-                    continue
-
-                listed_price_chaos = self.extract_price_chaos(listing)
-                if listed_price_chaos is None:
-                    continue
-
-                state = self.parse_api_to_state(item_json)
-                if not state:
-                    continue
-
-                # THE MAGIC: Evaluates ML prediction
-                ml_value = self.oracle.predict_value(state)
-                profit = ml_value - listed_price_chaos
-
-                # Build trade link (query IDs da API são da rota /trade/search)
-                item_id = str(item_json.get("id", ""))
-                search_link = (
-                    f"https://www.pathofexile.com/trade/search/{self.api_client.league}/{query_id}"
-                    if query_id
-                    else ""
-                )
-                trade_link = (
-                    f"{search_link}#{item_id}"
-                    if search_link and item_id
-                    else search_link
-                )
-
-                account_info = (
-                    listing.get("account", {})
-                    if isinstance(listing.get("account"), dict)
-                    else {}
-                )
-                seller = account_info.get("name") or listing.get("accountName") or ""
-                indexed_at = listing.get("indexed") or listing.get("indexedAt")
-
-                if anti_fix and self._is_probable_price_fix(
-                    listed_price_chaos=listed_price_chaos,
-                    ml_value=ml_value,
-                    indexed_at=indexed_at,
-                    stale_hours=stale_hours,
-                ):
-                    continue
-
-                explicit_mods = (
-                    item_data.get("explicitMods")
-                    if isinstance(item_data.get("explicitMods"), list)
-                    else []
-                )
-                implicit_mods = (
-                    item_data.get("implicitMods")
-                    if isinstance(item_data.get("implicitMods"), list)
-                    else []
-                )
-                corrupted = bool(item_data.get("corrupted", False))
-                fractured = bool(item_data.get("fractured", False))
-                influences = self.extract_influences(item_data)
-
-                evaluated_items.append(
-                    {
-                        "base_type": state.base_type,
-                        "ilvl": state.ilvl,
-                        "listed_price": round(listed_price_chaos, 1),
-                        "ml_value": round(ml_value, 1),
-                        "profit": round(profit, 1),
-                        "whisper": whisper,
-                        "trade_link": trade_link,
-                        "trade_search_link": search_link,
-                        "item_id": item_id,
-                        "listing_currency": str(
-                            (listing.get("price") or {}).get("currency", "")
-                        ),
-                        "listing_amount": (listing.get("price") or {}).get("amount", 0),
-                        "seller": seller,
-                        "indexed_at": indexed_at,
-                        "corrupted": corrupted,
-                        "fractured": fractured,
-                        "influences": influences,
-                        "explicit_mods": explicit_mods,
-                        "implicit_mods": implicit_mods,
-                    }
-                )
-
-        # Sort: Margens mais lucrosas no TOP
-        evaluated_items.sort(key=lambda x: x["profit"], reverse=True)
-
-        if math.isfinite(min_profit):
-            evaluated_items = [
-                item
-                for item in evaluated_items
-                if float(item.get("profit", 0.0)) >= min_profit
-            ]
-
-        return evaluated_items
+        safe_buy: bool = False,
+    ) -> Tuple[List[Dict], ScanStats]:
+        opportunities, stats = self.scan_opportunities(
+            item_class=item_class,
+            ilvl_min=ilvl_min,
+            rarity=rarity,
+            max_items=max_items,
+            min_profit=min_profit,
+            anti_fix=anti_fix,
+            stale_hours=stale_hours,
+            safe_buy=safe_buy,
+        )
+        return [opportunity.to_dict() for opportunity in opportunities], stats
