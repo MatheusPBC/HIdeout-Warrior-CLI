@@ -1,7 +1,10 @@
 from pathlib import Path
 from typing import Set, Tuple, TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
+
+from core.meta_analyzer import LadderAnalyzer, MetaScores, calculate_meta_utility_score
 
 PRICE_ORACLE_FEATURE_SCHEMA = (
     "is_influenced",
@@ -27,6 +30,8 @@ class PricePredictor:
 
     def __init__(self):
         self.model = None
+        self._meta_scores: MetaScores | None = None
+        self._meta_cache_loaded = False
         self._load_xgboost()
 
         # Dicionários de sinergias (Mock Fallback).
@@ -85,8 +90,8 @@ class PricePredictor:
 
         open_affixes = item_state.open_prefixes + item_state.open_suffixes
 
-        # meta_utility_score requer LadderAnalyzer - usando 0 como default
-        meta_utility_score = 0.0
+        item_tags = self._extract_item_tags(current_mods, item_state.is_fractured)
+        meta_utility_score = self._calculate_meta_utility_score(item_tags)
 
         return [
             [
@@ -100,6 +105,82 @@ class PricePredictor:
                 meta_utility_score,
             ]
         ]
+
+    def _extract_item_tags(
+        self, current_mods: Set[str], is_fractured: bool
+    ) -> list[str]:
+        tags: list[str] = []
+        for mod in current_mods:
+            mod_lower = mod.lower()
+            if "life" in mod_lower:
+                tags.append("life")
+            if "speed" in mod_lower:
+                tags.append("speed")
+            if "resistance" in mod_lower or "resist" in mod_lower:
+                tags.append("resistance")
+            if "critical" in mod_lower or "crit" in mod_lower:
+                tags.append("crit")
+            if "fire" in mod_lower:
+                tags.append("fire")
+            if "cold" in mod_lower:
+                tags.append("cold")
+            if "lightning" in mod_lower:
+                tags.append("lightning")
+            if "physical" in mod_lower:
+                tags.append("physical")
+            if "chaos" in mod_lower:
+                tags.append("chaos")
+            if "attack" in mod_lower:
+                tags.append("attack")
+            if "spell" in mod_lower:
+                tags.append("spell")
+
+        if is_fractured:
+            tags.append("fractured")
+
+        return sorted(set(tags))
+
+    def _load_meta_scores_cache(self) -> None:
+        if self._meta_cache_loaded:
+            return
+        self._meta_cache_loaded = True
+        try:
+            analyzer = LadderAnalyzer()
+            cached_scores = analyzer.get_cached_scores()
+            if cached_scores and cached_scores.scores:
+                self._meta_scores = cached_scores
+        except Exception:
+            self._meta_scores = None
+
+    def _calculate_meta_utility_score(self, item_tags: list[str]) -> float:
+        if not item_tags:
+            return 0.0
+
+        self._load_meta_scores_cache()
+        if self._meta_scores is None:
+            return 0.0
+
+        return float(
+            calculate_meta_utility_score(
+                item_tags=item_tags,
+                meta_scores=self._meta_scores,
+                aggregation="mean",
+            )
+        )
+
+    def _apply_target_inverse_transform(self, prediction_value: float) -> float:
+        if not self.model:
+            return max(0.0, prediction_value)
+
+        try:
+            target_transform = self.model.attr("target_transform")
+        except Exception:
+            target_transform = None
+
+        if target_transform == "log1p":
+            prediction_value = float(np.expm1(prediction_value))
+
+        return max(0.0, prediction_value)
 
     def _build_inference_dataframe(self, item_state: "ItemState") -> pd.DataFrame:
         features = self._extract_features(item_state)
@@ -130,7 +211,7 @@ class PricePredictor:
             dmatrix = xgb.DMatrix(df)
 
             prediction = self.model.predict(dmatrix)
-            preco = max(0.0, float(prediction[0]))
+            preco = self._apply_target_inverse_transform(float(prediction[0]))
             return (preco, confianca)
 
         # -- Fallback Heuristic --

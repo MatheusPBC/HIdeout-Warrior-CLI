@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 import sys
 import os
 from datetime import datetime, timezone, timedelta
@@ -6,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.market_scanner import ListingSnapshot, OnDemandScanner
+from core.market_scanner import ListingSnapshot, OnDemandScanner, ScanOpportunity
 from core.graph_engine import ItemState
 
 
@@ -372,3 +373,455 @@ class TestSafeBuyDynamicConfidence:
         returned_ids = {opportunity.item_id for opportunity in opportunities}
         assert returned_ids == {"item_low_price", "item_mid_price"}
         assert stats.filtered_safe_buy_confidence == 1
+
+
+class TestHybridPipelineAndMetrics:
+    @patch("core.market_scanner.MarketAPIClient")
+    @patch("core.market_scanner.PricePredictor")
+    def test_dedupe_ttl_cache(self, _mock_oracle_cls, mock_client_cls):
+        mock_client = mock_client_cls.return_value
+        mock_client.league = "Standard"
+        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
+
+        scanner = OnDemandScanner(league="Standard")
+        scanner._dedupe_ttl_seconds = 60
+
+        assert scanner._register_item_if_new("item-1", now_ts=100.0) is True
+        assert scanner._register_item_if_new("item-1", now_ts=120.0) is False
+        assert scanner._register_item_if_new("item-1", now_ts=161.0) is True
+
+    @patch("core.market_scanner.MarketAPIClient")
+    @patch("core.market_scanner.PricePredictor")
+    def test_stage_b_runs_only_for_stage_a_approved_items(
+        self,
+        _mock_oracle_cls,
+        mock_client_cls,
+    ):
+        mock_client = mock_client_cls.return_value
+        mock_client.league = "Standard"
+        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
+
+        scanner = OnDemandScanner(league="Standard")
+        scanner._execute_hybrid_ingestion = MagicMock(
+            return_value=(
+                {
+                    "candidates": [
+                        {
+                            "listing": {
+                                "whisper": "@seller hi",
+                                "price": {"amount": 45.0, "currency": "chaos"},
+                                "account": {"name": "seller1"},
+                                "indexed": "2026-03-10T09:00:00Z",
+                            },
+                            "item": {
+                                "id": "item_stage_a_ok",
+                                "baseType": "Imbued Wand",
+                                "ilvl": 84,
+                                "explicitMods": ["+# to maximum Life"],
+                                "implicitMods": [],
+                                "corrupted": False,
+                                "fractured": False,
+                                "influences": {},
+                            },
+                        },
+                        {
+                            "listing": {
+                                "whisper": "",
+                                "price": {"amount": 45.0, "currency": "chaos"},
+                                "account": {"name": "seller2"},
+                                "indexed": "2026-03-10T09:00:00Z",
+                            },
+                            "item": {
+                                "id": "item_stage_a_fail",
+                                "baseType": "Imbued Wand",
+                                "ilvl": 84,
+                                "explicitMods": ["+# to maximum Life"],
+                                "implicitMods": [],
+                                "corrupted": False,
+                                "fractured": False,
+                                "influences": {},
+                            },
+                        },
+                    ],
+                    "coverage": {"40-120": 1},
+                    "query_ids": ["query123"],
+                    "total_found": 2,
+                },
+                {"candidates": [], "query_ids": [], "total_found": 0},
+            )
+        )
+
+        scanner._stage_b_ml_evaluation = MagicMock(return_value=None)
+
+        opportunities, stats = scanner.scan_opportunities(max_items=10, anti_fix=False)
+
+        assert opportunities == []
+        assert scanner._stage_b_ml_evaluation.call_count == 1
+        assert stats.stage_a_passed == 1
+
+    @patch("core.market_scanner.MarketAPIClient")
+    @patch("core.market_scanner.PricePredictor")
+    def test_non_linear_ticket_approval_rules(self, _mock_oracle_cls, mock_client_cls):
+        mock_client = mock_client_cls.return_value
+        mock_client.league = "Standard"
+        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
+
+        scanner = OnDemandScanner(league="Standard")
+
+        low_ticket = ScanOpportunity(
+            item_id="a",
+            base_type="Imbued Wand",
+            ilvl=84,
+            listed_price=30.0,
+            ml_value=40.0,
+            ml_confidence=0.7,
+            profit=5.0,
+            score=50.0,
+            valuation_gap=5.0,
+            relative_discount=0.15,
+            whisper="@seller hi",
+            trade_link="x",
+            trade_search_link="x",
+            listing_currency="chaos",
+            listing_amount=30.0,
+            seller="seller",
+            indexed_at=None,
+            resolved_league="Standard",
+            corrupted=False,
+            fractured=False,
+        )
+        mid_ticket = ScanOpportunity(
+            **{
+                **low_ticket.to_dict(),
+                "item_id": "b",
+                "listed_price": 70.0,
+                "profit": 12.0,
+            }
+        )
+        high_ticket_fail = ScanOpportunity(
+            **{
+                **low_ticket.to_dict(),
+                "item_id": "c",
+                "listed_price": 180.0,
+                "profit": 30.0,
+                "ml_confidence": 0.79,
+            }
+        )
+        high_ticket_ok = ScanOpportunity(
+            **{
+                **low_ticket.to_dict(),
+                "item_id": "d",
+                "listed_price": 180.0,
+                "profit": 31.0,
+                "ml_confidence": 0.85,
+            }
+        )
+
+        assert scanner._passes_non_linear_ticket_rule(low_ticket) is True
+        assert scanner._passes_non_linear_ticket_rule(mid_ticket) is True
+        assert scanner._passes_non_linear_ticket_rule(high_ticket_fail) is False
+        assert scanner._passes_non_linear_ticket_rule(high_ticket_ok) is True
+
+    @patch("core.market_scanner.MarketAPIClient")
+    @patch("core.market_scanner.PricePredictor")
+    def test_scan_stats_exposes_new_hybrid_metrics(
+        self, _mock_oracle_cls, mock_client_cls
+    ):
+        mock_client = mock_client_cls.return_value
+        mock_client.league = "Standard"
+        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
+
+        scanner = OnDemandScanner(league="Standard")
+        scanner._execute_hybrid_ingestion = MagicMock(
+            return_value=(
+                {
+                    "candidates": [
+                        {
+                            "listing": {
+                                "whisper": "@seller hi",
+                                "price": {"amount": 60.0, "currency": "chaos"},
+                                "account": {"name": "seller1"},
+                                "indexed": "2026-03-10T09:00:00Z",
+                            },
+                            "item": {
+                                "id": "same-id",
+                                "baseType": "Imbued Wand",
+                                "ilvl": 84,
+                                "explicitMods": ["+# to maximum Life"],
+                                "implicitMods": [],
+                                "corrupted": False,
+                                "fractured": False,
+                                "influences": {},
+                            },
+                        }
+                    ],
+                    "coverage": {"40-120": 1},
+                    "query_ids": ["query123"],
+                    "total_found": 1,
+                },
+                {
+                    "candidates": [
+                        {
+                            "listing": {
+                                "whisper": "@seller hi",
+                                "price": {"amount": 60.0, "currency": "chaos"},
+                                "account": {"name": "seller1"},
+                                "indexed": "2026-03-10T09:00:00Z",
+                            },
+                            "item": {
+                                "id": "same-id",
+                                "baseType": "Imbued Wand",
+                                "ilvl": 84,
+                                "explicitMods": ["+# to maximum Life"],
+                                "implicitMods": [],
+                                "corrupted": False,
+                                "fractured": False,
+                                "influences": {},
+                            },
+                        }
+                    ],
+                    "query_ids": ["query999"],
+                    "total_found": 1,
+                },
+            )
+        )
+        scanner._stage_b_ml_evaluation = MagicMock(return_value=None)
+
+        _, stats = scanner.scan_opportunities(max_items=10, anti_fix=False)
+
+        assert isinstance(stats.coverage_by_bucket, dict)
+        assert hasattr(stats, "candidates_macro")
+        assert hasattr(stats, "candidates_micro")
+        assert hasattr(stats, "deduped")
+        assert hasattr(stats, "stage_a_passed")
+        assert hasattr(stats, "stage_b_passed")
+        assert hasattr(stats, "final_approval_rate")
+        assert stats.candidates_macro == 1
+        assert stats.candidates_micro == 1
+        assert stats.deduped == 1
+
+
+class TestHybridHotfixes:
+    @patch("core.market_scanner.MarketAPIClient")
+    @patch("core.market_scanner.PricePredictor")
+    def test_build_trade_query_avoids_invalid_flag_filters(
+        self, _mock_oracle_cls, mock_client_cls
+    ):
+        mock_client = mock_client_cls.return_value
+        mock_client.league = "Mirage"
+        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
+
+        scanner = OnDemandScanner(league="Mirage")
+        query = scanner.build_trade_query(
+            item_class="Imbued Wand",
+            ilvl_min=84,
+            is_influenced=True,
+            fractured_only=True,
+        )
+        misc_filters = query["query"]["filters"]["misc_filters"]["filters"]
+
+        assert "influence" not in misc_filters
+        assert "fractured" not in misc_filters
+
+    @patch("core.market_scanner.MarketAPIClient")
+    @patch("core.market_scanner.PricePredictor")
+    def test_safe_search_retries_without_invalid_flag_filters(
+        self, _mock_oracle_cls, mock_client_cls
+    ):
+        mock_client = mock_client_cls.return_value
+        mock_client.league = "Mirage"
+        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
+        mock_client.search_items.side_effect = [
+            ("", []),
+            ("query-ok", ["fetch-id"]),
+        ]
+        mock_client.fetch_item_details.return_value = [
+            {
+                "id": "top-id",
+                "listing": {
+                    "whisper": "@seller hi",
+                    "price": {"amount": 10.0, "currency": "chaos"},
+                    "account": {"name": "seller"},
+                    "indexed": "2026-03-10T09:00:00Z",
+                },
+                "item": {
+                    "id": "nested-id",
+                    "baseType": "Imbued Wand",
+                    "ilvl": 84,
+                    "explicitMods": ["+# to maximum Life"],
+                    "implicitMods": [],
+                    "corrupted": False,
+                    "fractured": False,
+                    "influences": {},
+                },
+            }
+        ]
+
+        scanner = OnDemandScanner(league="Mirage")
+        query = scanner.build_trade_query(item_class="Imbued Wand", ilvl_min=84)
+        query["query"]["filters"]["misc_filters"]["filters"]["influence"] = {
+            "option": "true"
+        }
+        query["query"]["filters"]["misc_filters"]["filters"]["fractured"] = {
+            "option": "true"
+        }
+
+        query_id, details, total = scanner._safe_search_and_fetch(query, max_items=5)
+
+        assert query_id == "query-ok"
+        assert len(details) == 1
+        assert total == 1
+        assert mock_client.search_items.call_count == 2
+        first_payload = mock_client.search_items.call_args_list[0][0][0]
+        second_payload = mock_client.search_items.call_args_list[1][0][0]
+        assert (
+            "influence" in first_payload["query"]["filters"]["misc_filters"]["filters"]
+        )
+        assert (
+            "fractured" in first_payload["query"]["filters"]["misc_filters"]["filters"]
+        )
+        assert (
+            "influence"
+            not in second_payload["query"]["filters"]["misc_filters"]["filters"]
+        )
+        assert (
+            "fractured"
+            not in second_payload["query"]["filters"]["misc_filters"]["filters"]
+        )
+
+    @patch("core.market_scanner.MarketAPIClient")
+    @patch("core.market_scanner.PricePredictor")
+    def test_macro_sweep_uses_segment_budget_and_cursor_rotation(
+        self, _mock_oracle_cls, mock_client_cls
+    ):
+        mock_client = mock_client_cls.return_value
+        mock_client.league = "Mirage"
+        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
+
+        scanner = OnDemandScanner(league="Mirage")
+        seen_segments_first_run = []
+
+        def fake_safe_search(query, _max_items):
+            signature = (
+                query["query"].get("type"),
+                query["query"]["filters"]["misc_filters"]["filters"]["ilvl"].get("min"),
+                query["query"]["filters"]["trade_filters"]["filters"]["price"].get(
+                    "min"
+                ),
+            )
+            seen_segments_first_run.append(signature)
+            return "q", [], 0
+
+        scanner._safe_search_and_fetch = MagicMock(side_effect=fake_safe_search)
+
+        asyncio.run(
+            scanner._run_macro_sweep(
+                item_class="",
+                ilvl_min=75,
+                rarity="rare",
+                max_items=8,
+                min_listed_price=1.0,
+            )
+        )
+
+        budget = scanner._macro_query_budget(max_items=8, total_segments=180)
+        assert len(seen_segments_first_run) == budget
+
+        seen_segments_second_run = []
+
+        def fake_safe_search_second(query, _max_items):
+            signature = (
+                query["query"].get("type"),
+                query["query"]["filters"]["misc_filters"]["filters"]["ilvl"].get("min"),
+                query["query"]["filters"]["trade_filters"]["filters"]["price"].get(
+                    "min"
+                ),
+            )
+            seen_segments_second_run.append(signature)
+            return "q", [], 0
+
+        scanner._safe_search_and_fetch = MagicMock(side_effect=fake_safe_search_second)
+
+        asyncio.run(
+            scanner._run_macro_sweep(
+                item_class="",
+                ilvl_min=75,
+                rarity="rare",
+                max_items=8,
+                min_listed_price=1.0,
+            )
+        )
+
+        assert len(seen_segments_second_run) == budget
+        assert seen_segments_first_run[0] != seen_segments_second_run[0]
+
+    @patch("core.market_scanner.MarketAPIClient")
+    @patch("core.market_scanner.PricePredictor")
+    def test_dedupe_prefers_top_level_id_over_nested_item_id(
+        self, _mock_oracle_cls, mock_client_cls
+    ):
+        mock_client = mock_client_cls.return_value
+        mock_client.league = "Mirage"
+        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
+
+        scanner = OnDemandScanner(league="Mirage")
+        scanner._execute_hybrid_ingestion = MagicMock(
+            return_value=(
+                {
+                    "candidates": [
+                        {
+                            "id": "top-id-1",
+                            "listing": {
+                                "whisper": "@seller hi",
+                                "price": {"amount": 40.0, "currency": "chaos"},
+                                "account": {"name": "seller1"},
+                                "indexed": "2026-03-10T09:00:00Z",
+                            },
+                            "item": {
+                                "id": "nested-a",
+                                "baseType": "Imbued Wand",
+                                "ilvl": 84,
+                                "explicitMods": ["+# to maximum Life"],
+                                "implicitMods": [],
+                                "corrupted": False,
+                                "fractured": False,
+                                "influences": {},
+                            },
+                        }
+                    ],
+                    "coverage": {"10-40": 1},
+                    "query_ids": ["query-a"],
+                    "total_found": 1,
+                },
+                {
+                    "candidates": [
+                        {
+                            "id": "top-id-1",
+                            "listing": {
+                                "whisper": "@seller hi",
+                                "price": {"amount": 42.0, "currency": "chaos"},
+                                "account": {"name": "seller2"},
+                                "indexed": "2026-03-10T09:00:00Z",
+                            },
+                            "item": {
+                                "id": "nested-b",
+                                "baseType": "Imbued Wand",
+                                "ilvl": 84,
+                                "explicitMods": ["+# to maximum Life"],
+                                "implicitMods": [],
+                                "corrupted": False,
+                                "fractured": False,
+                                "influences": {},
+                            },
+                        }
+                    ],
+                    "query_ids": ["query-b"],
+                    "total_found": 1,
+                },
+            )
+        )
+        scanner._stage_b_ml_evaluation = MagicMock(return_value=None)
+
+        _, stats = scanner.scan_opportunities(max_items=10, anti_fix=False)
+
+        assert stats.deduped == 1

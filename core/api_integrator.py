@@ -1,8 +1,10 @@
 import json
 import logging
 import os
+import random
 import re
 import time
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -32,6 +34,12 @@ class MarketAPIClient:
         }
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+
+        self._trade_max_retries = 5
+        self._trade_base_backoff_seconds = 0.4
+        self._trade_dynamic_delay_seconds = 0.0
+        self._trade_next_allowed_at = 0.0
+        self._trade_last_request_at = 0.0
 
         os.makedirs(self.data_dir, exist_ok=True)
 
@@ -134,7 +142,9 @@ class MarketAPIClient:
             with open(self.market_cache_file, "r", encoding="utf-8") as handle:
                 return json.load(handle)
 
-        url = f"{self.ninja_base_url}/currencyoverview?league={self.league}&type=Currency"
+        url = (
+            f"{self.ninja_base_url}/currencyoverview?league={self.league}&type=Currency"
+        )
         try:
             response = requests.get(
                 url,
@@ -179,25 +189,185 @@ class MarketAPIClient:
                 except (ValueError, TypeError):
                     continue
                 if (max_hits - current_hits) <= 1:
-                    logger.warning("[%s] Limite de requests proximo. Esfriando por 3s.", self.league)
+                    logger.warning(
+                        "[%s] Limite de requests proximo. Esfriando por 3s.",
+                        self.league,
+                    )
                     time.sleep(3)
+
+    def _parse_retry_after_seconds(
+        self, retry_after_value: Optional[str]
+    ) -> Optional[float]:
+        if not retry_after_value:
+            return None
+
+        value = retry_after_value.strip()
+        if not value:
+            return None
+
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+
+        try:
+            target_time = parsedate_to_datetime(value)
+            now = time.time()
+            return max(0.0, target_time.timestamp() - now)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _compute_header_throttle_seconds(self, response: requests.Response) -> float:
+        state_header = response.headers.get("X-Rate-Limit-Ip-State", "")
+        if not state_header:
+            return 0.0
+
+        best_delay = 0.0
+        for rule in state_header.split(","):
+            parts = [part.strip() for part in rule.split(":")]
+            if len(parts) < 3:
+                continue
+
+            try:
+                current_hits = int(parts[0])
+                max_hits = int(parts[1])
+                period_seconds = float(parts[2])
+            except (ValueError, TypeError):
+                continue
+
+            if max_hits <= 0 or period_seconds <= 0:
+                continue
+
+            utilization = current_hits / max_hits
+            per_request_delay = period_seconds / max_hits
+
+            if utilization >= 0.95:
+                best_delay = max(best_delay, max(1.0, per_request_delay * 2.5))
+            elif utilization >= 0.85:
+                best_delay = max(best_delay, max(0.2, per_request_delay * 1.4))
+            elif utilization >= 0.70:
+                best_delay = max(best_delay, max(0.05, per_request_delay * 0.8))
+
+        return best_delay
+
+    def _apply_pre_request_throttle(self) -> None:
+        now = time.time()
+        scheduled_at = max(self._trade_next_allowed_at, self._trade_last_request_at)
+        delay_from_dynamic_window = self._trade_dynamic_delay_seconds
+        wait_seconds = max(0.0, scheduled_at + delay_from_dynamic_window - now)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    def _update_rate_state_from_response(self, response: requests.Response) -> None:
+        now = time.time()
+
+        if response.status_code == 429:
+            retry_after = self._parse_retry_after_seconds(
+                response.headers.get("Retry-After")
+            )
+            if retry_after is None:
+                retry_after = 2.0
+            self._trade_next_allowed_at = max(
+                self._trade_next_allowed_at, now + retry_after
+            )
+            self._trade_dynamic_delay_seconds = max(
+                self._trade_dynamic_delay_seconds,
+                min(3.0, retry_after / 2),
+            )
+            return
+
+        header_delay = self._compute_header_throttle_seconds(response)
+        if header_delay > 0:
+            self._trade_dynamic_delay_seconds = max(
+                self._trade_dynamic_delay_seconds * 0.85,
+                header_delay,
+            )
+        else:
+            self._trade_dynamic_delay_seconds *= 0.92
+
+        self._trade_dynamic_delay_seconds = max(
+            0.0, min(3.0, self._trade_dynamic_delay_seconds)
+        )
+
+    def _calculate_retry_delay(
+        self,
+        attempt_index: int,
+        response: Optional[requests.Response],
+    ) -> Optional[float]:
+        if response is not None and response.status_code == 429:
+            retry_after = self._parse_retry_after_seconds(
+                response.headers.get("Retry-After")
+            )
+            if retry_after is not None:
+                return retry_after
+
+        exponential = self._trade_base_backoff_seconds * (2**attempt_index)
+        jitter = random.uniform(0.05, 0.35)
+        return min(8.0, exponential + jitter)
+
+    def _trade_request(
+        self, method: str, url: str, **kwargs: Any
+    ) -> Optional[requests.Response]:
+        retriable_statuses = {429, 500, 502, 503, 504}
+
+        for attempt in range(self._trade_max_retries):
+            self._apply_pre_request_throttle()
+            self._trade_last_request_at = time.time()
+
+            try:
+                response = self.session.request(
+                    method=method, url=url, timeout=15, **kwargs
+                )
+            except requests.exceptions.RequestException as exc:
+                if attempt >= self._trade_max_retries - 1:
+                    logger.error(
+                        "[%s] Erro de request na trade API: %s", self.league, exc
+                    )
+                    return None
+
+                retry_delay = self._calculate_retry_delay(attempt, response=None)
+                if retry_delay is not None and retry_delay > 0:
+                    time.sleep(retry_delay)
+                continue
+
+            self._update_rate_state_from_response(response)
+
+            if response.status_code not in retriable_statuses:
+                return response
+
+            if attempt >= self._trade_max_retries - 1:
+                return response
+
+            retry_delay = self._calculate_retry_delay(attempt, response=response)
+            if retry_delay is not None and retry_delay > 0:
+                time.sleep(retry_delay)
+
+        return None
 
     def search_items(self, query_json: dict) -> Tuple[str, List[str]]:
         league_encoded = quote(self.league, safe="")
         url = f"{self.ggg_base_url}/search/{league_encoded}"
         try:
-            response = self.session.post(url, json=query_json, timeout=15)
-            self._circuit_breaker(response)
+            response = self._trade_request("POST", url, json=query_json)
+            if response is None:
+                return "", []
             if response.status_code == 200:
                 data = response.json()
                 return data.get("id", ""), data.get("result", [])
-            logger.error("[%s] Search Error %s: %s", self.league, response.status_code, response.text)
+            logger.error(
+                "[%s] Search Error %s: %s",
+                self.league,
+                response.status_code,
+                response.text,
+            )
             return "", []
         except requests.exceptions.RequestException as exc:
             logger.error("[%s] Erro na busca da trade API: %s", self.league, exc)
             return "", []
 
-    def fetch_item_details(self, item_ids: List[str], query_id: str) -> List[Dict[str, Any]]:
+    def fetch_item_details(
+        self, item_ids: List[str], query_id: str
+    ) -> List[Dict[str, Any]]:
         if not item_ids:
             return []
 
@@ -206,15 +376,20 @@ class MarketAPIClient:
 
         ids_str = ",".join(item_ids)
         url = f"{self.ggg_base_url}/fetch/{ids_str}?query={query_id}"
-        time.sleep(0.5)
 
         try:
-            response = self.session.get(url, timeout=15)
-            self._circuit_breaker(response)
+            response = self._trade_request("GET", url)
+            if response is None:
+                return []
             if response.status_code == 200:
                 data = response.json()
                 return data.get("result", [])
-            logger.error("[%s] Fetch Error %s: %s", self.league, response.status_code, response.text)
+            logger.error(
+                "[%s] Fetch Error %s: %s",
+                self.league,
+                response.status_code,
+                response.text,
+            )
             return []
         except requests.exceptions.RequestException as exc:
             logger.error("[%s] Erro no fetch da trade API: %s", self.league, exc)

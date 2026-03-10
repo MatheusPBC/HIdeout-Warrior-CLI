@@ -1,7 +1,9 @@
 import sys
 import os
+import json
 import time
-from datetime import datetime, timedelta
+import re
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional, Tuple, Any, Set, cast
 
 # Adicionar a raiz ao PYTHONPATH para os imports do core funcionarem localmente
@@ -17,6 +19,92 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from core.api_integrator import MarketAPIClient
 from core.graph_engine import ItemState
 from core.meta_analyzer import LadderAnalyzer, MetaScores, calculate_meta_utility_score
+
+
+PRICE_QUERY_BUCKETS: List[Tuple[float, Optional[float]]] = [
+    (1.0, 10.0),
+    (10.0, 40.0),
+    (40.0, 120.0),
+    (120.0, None),
+]
+
+
+def _slugify(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+
+
+def default_dataset_path(league: str) -> str:
+    os.makedirs("data", exist_ok=True)
+    return os.path.join("data", f"oracle_dataset_{_slugify(league)}.jsonl")
+
+
+def default_checkpoint_path(league: str) -> str:
+    os.makedirs("data", exist_ok=True)
+    return os.path.join("data", f"oracle_collect_checkpoint_{_slugify(league)}.json")
+
+
+def append_jsonl_records(path: str, records: List[Dict[str, Any]]) -> None:
+    if not records:
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def load_jsonl_records(path: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+
+    records: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
+    return records
+
+
+def read_seen_item_ids(path: str) -> Set[str]:
+    seen_ids: Set[str] = set()
+    for row in load_jsonl_records(path):
+        item_id = row.get("item_id")
+        if isinstance(item_id, str) and item_id:
+            seen_ids.add(item_id)
+    return seen_ids
+
+
+def save_checkpoint(path: str, checkpoint: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(checkpoint, handle, ensure_ascii=False, indent=2)
+
+
+def load_checkpoint(path: str) -> Dict[str, Any]:
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    return payload if isinstance(payload, dict) else {}
+
+
+def deduplicate_by_item_id(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for row in records:
+        item_id = row.get("item_id")
+        if isinstance(item_id, str) and item_id:
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+        deduped.append(row)
+    return deduped
 
 
 def parse_trade_item_to_features(
@@ -508,6 +596,177 @@ def calculate_feature_overlap(train_x: pd.DataFrame, test_x: pd.DataFrame) -> in
     return int(len(train_fingerprints.intersection(test_fingerprints)))
 
 
+def sample_result_ids_stratified(
+    result_ids: List[str], sample_size: int, n_strata: int = 10
+) -> List[str]:
+    """
+    Deterministic stratified sampling over ranked result IDs.
+
+    Splits the ranked list into strata and samples proportionally from each
+    stratum, preserving rank order in the final output.
+    """
+    if sample_size <= 0 or not result_ids:
+        return []
+
+    total = len(result_ids)
+    if sample_size >= total:
+        return list(result_ids)
+
+    strata_count = max(1, min(n_strata, total, sample_size))
+    boundaries = np.linspace(0, total, strata_count + 1, dtype=int)
+
+    selected_indices: List[int] = []
+    base_quota = sample_size // strata_count
+    remainder = sample_size % strata_count
+
+    for stratum_idx in range(strata_count):
+        start = int(boundaries[stratum_idx])
+        end = int(boundaries[stratum_idx + 1])
+        if end <= start:
+            continue
+
+        stratum_indices = list(range(start, end))
+        quota = base_quota + (1 if stratum_idx < remainder else 0)
+        if quota <= 0:
+            continue
+        quota = min(quota, len(stratum_indices))
+
+        if quota == len(stratum_indices):
+            selected_indices.extend(stratum_indices)
+            continue
+
+        local_positions = np.linspace(0, len(stratum_indices) - 1, quota, dtype=int)
+        selected_indices.extend(stratum_indices[pos] for pos in local_positions)
+
+    selected_indices = sorted(set(selected_indices))
+
+    if len(selected_indices) < sample_size:
+        missing = sample_size - len(selected_indices)
+        selected_set = set(selected_indices)
+        for idx in range(total):
+            if idx in selected_set:
+                continue
+            selected_indices.append(idx)
+            missing -= 1
+            if missing == 0:
+                break
+
+    selected_indices = sorted(selected_indices[:sample_size])
+    return [result_ids[idx] for idx in selected_indices]
+
+
+def allocate_items_across_price_buckets(
+    items_per_base: int,
+    bucket_count: int = len(PRICE_QUERY_BUCKETS),
+) -> List[int]:
+    if items_per_base <= 0 or bucket_count <= 0:
+        return []
+
+    base_quota = items_per_base // bucket_count
+    remainder = items_per_base % bucket_count
+    return [base_quota + (1 if idx < remainder else 0) for idx in range(bucket_count)]
+
+
+def build_price_filter_for_query(
+    min_price: float,
+    max_price: Optional[float],
+) -> Dict[str, float | str]:
+    price_filter: Dict[str, float | str] = {
+        "option": "chaos",
+        "min": float(min_price),
+    }
+    if max_price is not None:
+        price_filter["max"] = float(max_price)
+    return price_filter
+
+
+def summarize_price_distribution(
+    df: pd.DataFrame,
+    target_col: str = "price_chaos",
+) -> Dict[str, Any]:
+    if target_col not in df.columns or df.empty:
+        return {
+            "rows": int(len(df)),
+            "nunique": 0,
+            "bucket_counts": {"<=50": 0, "50-150": 0, ">150": 0},
+            "quantiles": {},
+        }
+
+    target = df[target_col]
+    bucket_counts = {
+        "<=50": int((target <= 50).sum()),
+        "50-150": int(((target > 50) & (target <= 150)).sum()),
+        ">150": int((target > 150).sum()),
+    }
+    quantiles = {
+        "q05": float(target.quantile(0.05)),
+        "q25": float(target.quantile(0.25)),
+        "q50": float(target.quantile(0.50)),
+        "q75": float(target.quantile(0.75)),
+        "q95": float(target.quantile(0.95)),
+    }
+
+    return {
+        "rows": int(len(df)),
+        "nunique": int(target.nunique()),
+        "bucket_counts": bucket_counts,
+        "quantiles": quantiles,
+    }
+
+
+def validate_dataset_distribution_or_raise(
+    df: pd.DataFrame,
+    target_col: str = "price_chaos",
+) -> Dict[str, Any]:
+    summary = summarize_price_distribution(df, target_col=target_col)
+    bucket_counts: Dict[str, int] = summary["bucket_counts"]
+    non_empty_buckets = [label for label, count in bucket_counts.items() if count > 0]
+    nunique = int(summary["nunique"])
+
+    if nunique < 5 or len(non_empty_buckets) == 1:
+        raise ValueError(
+            "Dataset degenerado para treino: distribuição de preço sem variação útil. "
+            f"nunique={nunique}, bucket_counts={bucket_counts}."
+        )
+
+    return summary
+
+
+def drop_leakage_columns(
+    frame: pd.DataFrame, leakage_columns: List[str]
+) -> pd.DataFrame:
+    return frame.drop(columns=leakage_columns, errors="ignore")
+
+
+def validate_training_schema(
+    train_x: pd.DataFrame,
+    test_x: pd.DataFrame,
+    forbidden_columns: List[str],
+) -> None:
+    train_cols = list(train_x.columns)
+    test_cols = list(test_x.columns)
+
+    if train_cols != test_cols:
+        raise ValueError(
+            "Train/test feature schema mismatch after leakage drop: "
+            f"train={train_cols}, test={test_cols}"
+        )
+
+    leaked = [col for col in train_cols if col in forbidden_columns]
+    if leaked:
+        raise ValueError(f"Forbidden columns leaked into model schema: {leaked}")
+
+
+def transform_target_log1p(y: pd.Series) -> pd.Series:
+    safe_target = y.clip(lower=0.0)
+    transformed = np.log1p(safe_target)
+    return pd.Series(transformed, index=y.index, name=y.name)
+
+
+def invert_target_log1p(y_pred: np.ndarray) -> np.ndarray:
+    return np.expm1(y_pred)
+
+
 def fetch_training_data(
     target_bases: List[str],
     items_per_base: int = 500,
@@ -552,9 +811,11 @@ def fetch_training_data(
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         TextColumn("({task.completed}/{task.total} iter)"),
     ) as progress:
-        total_iterations = len(target_bases) * (
-            (items_per_base + 9) // 10
-        )  # Ceiling division
+        bucket_allocations = allocate_items_across_price_buckets(
+            items_per_base, bucket_count=len(PRICE_QUERY_BUCKETS)
+        )
+        iterations_per_base = sum((quota + 9) // 10 for quota in bucket_allocations)
+        total_iterations = len(target_bases) * iterations_per_base
         overall_task = progress.add_task(
             "[cyan]Comunicação com API GGG...", total=total_iterations
         )
@@ -564,52 +825,73 @@ def fetch_training_data(
                 overall_task, description=f"[cyan]A Sacar Mercado: {base_type}..."
             )
 
-            query = {
-                "query": {
-                    "status": {"option": "online"},
-                    "type": base_type,
-                    "filters": {
-                        "trade_filters": {
-                            "filters": {
-                                "price": {"min": 1}  # Item precisa de ter buyout
-                            }
-                        }
-                    },
-                },
-                "sort": {"price": "asc"},
-            }
+            base_seen_ids: Set[str] = set()
+            fetched_any_bucket = False
+            for bucket_idx, (min_price, max_price) in enumerate(PRICE_QUERY_BUCKETS):
+                bucket_quota = bucket_allocations[bucket_idx]
+                if bucket_quota <= 0:
+                    continue
 
-            # Buscar os Metadados / Hash IDs do Filtro
-            query_id, result_ids = client.search_items(query)
-            if not query_id or not result_ids:
+                price_filter = build_price_filter_for_query(
+                    min_price=min_price,
+                    max_price=max_price,
+                )
+                query = {
+                    "query": {
+                        "status": {"option": "online"},
+                        "type": base_type,
+                        "filters": {
+                            "trade_filters": {
+                                "filters": {
+                                    "price": price_filter,
+                                }
+                            }
+                        },
+                    },
+                    "sort": {"price": "asc"},
+                }
+
+                query_id, result_ids = client.search_items(query)
+                if not query_id or not result_ids:
+                    progress.console.print(
+                        "[yellow]⚠️ Sem liquidez atual para "
+                        f"{base_type} no bucket {min_price}-{max_price or '+'}."
+                    )
+                    continue
+
+                fetched_any_bucket = True
+                sampled_ids = sample_result_ids_stratified(result_ids, bucket_quota)
+                sampled_ids = [
+                    item_id for item_id in sampled_ids if item_id not in base_seen_ids
+                ]
+                base_seen_ids.update(sampled_ids)
+
+                batch_size = 10
+                for i in range(0, len(sampled_ids), batch_size):
+                    batch_ids = sampled_ids[i : i + batch_size]
+                    details = client.fetch_item_details(batch_ids, query_id)
+
+                    for item_json in details:
+                        if (
+                            not item_json.get("listing", {})
+                            .get("price", {})
+                            .get("amount")
+                        ):
+                            continue
+
+                        features = parse_trade_item_to_features(
+                            item_json, currency_rates, meta_scores=meta_scores
+                        )
+
+                        if features:
+                            dataset.append(features)
+
+                    progress.advance(overall_task, advance=1)
+
+            if not fetched_any_bucket:
                 progress.console.print(
                     f"[yellow]⚠️ Sem liquidez atual para {base_type}."
                 )
-                continue
-
-            # Limitar a paginação para N elementos
-            result_ids = result_ids[:items_per_base]
-
-            # Request Batching GET -> Puxar blocos de 10 em 10 IDs exatos
-            batch_size = 10
-            for i in range(0, len(result_ids), batch_size):
-                batch_ids = result_ids[i : i + batch_size]
-                details = client.fetch_item_details(batch_ids, query_id)
-
-                for item_json in details:
-                    # Filtra preços corruptos / trocas (ex: WTB)
-                    if not item_json.get("listing", {}).get("price", {}).get("amount"):
-                        continue
-
-                    # Parse features with meta score integration
-                    features = parse_trade_item_to_features(
-                        item_json, currency_rates, meta_scores=meta_scores
-                    )
-
-                    if features:  # Only add if not filtered out
-                        dataset.append(features)
-
-                progress.advance(overall_task, advance=1)
 
     df = pd.DataFrame(dataset)
 
@@ -634,7 +916,177 @@ def fetch_training_data(
     return df
 
 
-def train_xgboost_oracle(league: str = "Standard", items_per_base: int = 500) -> None:
+def collect_training_data_incremental(
+    target_bases: List[str],
+    items_per_base: int,
+    league: str,
+    dataset_path: str,
+    checkpoint_path: str,
+    resume: bool,
+    chunk_size: int = 100,
+) -> Dict[str, int]:
+    client = MarketAPIClient(league=league)
+    currency_rates = client.sync_ninja_economy()
+
+    print("🌐 [Meta] Fetching current ladder meta scores...")
+    analyzer = LadderAnalyzer(league=league)
+    meta_scores = analyzer.fetch_meta_weights(force_refresh=False)
+
+    checkpoint = load_checkpoint(checkpoint_path) if resume else {}
+    start_base_idx = int(checkpoint.get("base_index", 0)) if checkpoint else 0
+    start_bucket_idx = int(checkpoint.get("bucket_index", 0)) if checkpoint else 0
+    start_batch_offset = int(checkpoint.get("batch_offset", 0)) if checkpoint else 0
+    checkpoint_base_seen = (
+        set(checkpoint.get("base_seen_ids", [])) if checkpoint else set()
+    )
+
+    seen_item_ids = read_seen_item_ids(dataset_path)
+    flushed_records = 0
+    pending_chunk: List[Dict[str, Any]] = []
+    bucket_allocations = allocate_items_across_price_buckets(
+        items_per_base, bucket_count=len(PRICE_QUERY_BUCKETS)
+    )
+
+    for base_idx, base_type in enumerate(target_bases):
+        if base_idx < start_base_idx:
+            continue
+
+        base_seen_ids: Set[str] = set()
+        if resume and base_idx == start_base_idx:
+            base_seen_ids = set(checkpoint_base_seen)
+
+        for bucket_idx, (min_price, max_price) in enumerate(PRICE_QUERY_BUCKETS):
+            if bucket_allocations[bucket_idx] <= 0:
+                continue
+            if base_idx == start_base_idx and bucket_idx < start_bucket_idx:
+                continue
+
+            query = {
+                "query": {
+                    "status": {"option": "online"},
+                    "type": base_type,
+                    "filters": {
+                        "trade_filters": {
+                            "filters": {
+                                "price": build_price_filter_for_query(
+                                    min_price=min_price,
+                                    max_price=max_price,
+                                )
+                            }
+                        }
+                    },
+                },
+                "sort": {"price": "asc"},
+            }
+            query_id, result_ids = client.search_items(query)
+            if not query_id or not result_ids:
+                continue
+
+            sampled_ids = sample_result_ids_stratified(
+                result_ids, bucket_allocations[bucket_idx]
+            )
+            sampled_ids = [
+                item_id for item_id in sampled_ids if item_id not in base_seen_ids
+            ]
+            base_seen_ids.update(sampled_ids)
+
+            effective_offset = 0
+            if base_idx == start_base_idx and bucket_idx == start_bucket_idx:
+                effective_offset = max(0, start_batch_offset)
+
+            for batch_offset in range(effective_offset, len(sampled_ids), 10):
+                batch_ids = sampled_ids[batch_offset : batch_offset + 10]
+                details = client.fetch_item_details(batch_ids, query_id)
+
+                for item_json in details:
+                    item_id = item_json.get("id")
+                    if not isinstance(item_id, str) or not item_id:
+                        continue
+                    if item_id in seen_item_ids:
+                        continue
+
+                    features = parse_trade_item_to_features(
+                        item_json,
+                        currency_rates,
+                        meta_scores=meta_scores,
+                    )
+                    if not features:
+                        continue
+
+                    features["item_id"] = item_id
+                    pending_chunk.append(features)
+                    seen_item_ids.add(item_id)
+
+                if len(pending_chunk) >= chunk_size:
+                    append_jsonl_records(dataset_path, pending_chunk)
+                    flushed_records += len(pending_chunk)
+                    pending_chunk = []
+
+                save_checkpoint(
+                    checkpoint_path,
+                    {
+                        "league": league,
+                        "base_index": base_idx,
+                        "bucket_index": bucket_idx,
+                        "batch_offset": batch_offset + 10,
+                        "base_seen_ids": sorted(base_seen_ids),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+
+            start_batch_offset = 0
+
+        save_checkpoint(
+            checkpoint_path,
+            {
+                "league": league,
+                "base_index": base_idx + 1,
+                "bucket_index": 0,
+                "batch_offset": 0,
+                "base_seen_ids": [],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    if pending_chunk:
+        append_jsonl_records(dataset_path, pending_chunk)
+        flushed_records += len(pending_chunk)
+
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+
+    return {
+        "written": flushed_records,
+        "seen_total": len(seen_item_ids),
+    }
+
+
+def load_dataset_for_training(
+    dataset_path: str,
+    apply_outlier_filter: bool = True,
+    apply_stale_filter: bool = True,
+) -> pd.DataFrame:
+    records = load_jsonl_records(dataset_path)
+    records = deduplicate_by_item_id(records)
+    df = pd.DataFrame(records)
+
+    if df.empty:
+        return df
+
+    if apply_outlier_filter and len(df) > 10:
+        df = remove_price_outliers_iqr(
+            df, group_col="base_type", price_col="price_chaos"
+        )
+    if apply_stale_filter and len(df) > 10:
+        df = remove_stale_listings(df, hours_threshold=48.0, min_tier_score=2)
+    return df
+
+
+def train_xgboost_oracle(
+    league: str = "Standard",
+    items_per_base: int = 500,
+    dataset_path: Optional[str] = None,
+) -> None:
     """
     Train the XGBoost price oracle with filtered market data.
 
@@ -654,21 +1106,35 @@ def train_xgboost_oracle(league: str = "Standard", items_per_base: int = 500) ->
         "Sadist Garb",
     ]
 
-    # O GGG Rate Limit aciona demorados limites (timeout 60s) em largas extrações.
-    # Puxaremos 500 de cada base x 6 = 3000 itens (respeitando a requisição de 2k-5k itens).
-    df = fetch_training_data(
-        target_bases,
-        items_per_base=items_per_base,
-        league=league,
-        apply_outlier_filter=True,
-        apply_stale_filter=True,
-    )
+    if dataset_path:
+        print(f"📂 [Training] Loading dataset from {dataset_path}")
+        df = load_dataset_for_training(
+            dataset_path=dataset_path,
+            apply_outlier_filter=True,
+            apply_stale_filter=True,
+        )
+    else:
+        # O GGG Rate Limit aciona demorados limites (timeout 60s) em largas extrações.
+        # Puxaremos 500 de cada base x 6 = 3000 itens (respeitando a requisição de 2k-5k itens).
+        df = fetch_training_data(
+            target_bases,
+            items_per_base=items_per_base,
+            league=league,
+            apply_outlier_filter=True,
+            apply_stale_filter=True,
+        )
 
     if len(df) < 50:
         print(
             "❌ Dados insuficientes extraídos (menos que 50). Verifique o GGG Ban IP."
         )
         sys.exit(1)
+
+    distribution_summary = validate_dataset_distribution_or_raise(df)
+    print("\n📈 [Distribuição] price_chaos")
+    print(f"   nunique: {distribution_summary['nunique']}")
+    print(f"   buckets: {distribution_summary['bucket_counts']}")
+    print(f"   quantis: {distribution_summary['quantiles']}")
 
     print(f"\n📊 Extracção Completa! Dados Válidos Encontrados: {len(df)} listagens.")
 
@@ -683,22 +1149,24 @@ def train_xgboost_oracle(league: str = "Standard", items_per_base: int = 500) ->
     raw_x_train, raw_x_test, y_train, y_test, split_strategy = (
         split_dataset_for_training(df)
     )
-    overlap_count = calculate_feature_overlap(raw_x_train, raw_x_test)
+    # Remove leakage-prone columns only after split
+    leakage_columns = ["listed_at", "base_type", "item_id"]
+    X_train = drop_leakage_columns(raw_x_train, leakage_columns)
+    X_test = drop_leakage_columns(raw_x_test, leakage_columns)
+    validate_training_schema(X_train, X_test, forbidden_columns=leakage_columns)
+    overlap_count = calculate_feature_overlap(X_train, X_test)
 
     print(f"\n🧩 [Split] Estratégia: {split_strategy}")
     print(f"   Treino: {len(raw_x_train)} amostras | Teste: {len(raw_x_test)} amostras")
     print(f"   Overlap train/test (fingerprint de features): {overlap_count}")
 
-    # Remove leakage-prone columns only after split
-    leakage_columns = ["listed_at", "base_type"]
-    X_train = raw_x_train.drop(columns=leakage_columns, errors="ignore")
-    X_test = raw_x_test.drop(columns=leakage_columns, errors="ignore")
-
     print(f"📋 Features usadas: {', '.join(X_train.columns)}")
     print("🧠 Injetando Matrizes no XGBoost Regressor...")
 
-    dtrain = xgb.DMatrix(X_train, label=y_train)
-    dtest = xgb.DMatrix(X_test, label=y_test)
+    y_train_transformed = transform_target_log1p(y_train)
+    y_test_transformed = transform_target_log1p(y_test)
+    dtrain = xgb.DMatrix(X_train, label=y_train_transformed)
+    dtest = xgb.DMatrix(X_test, label=y_test_transformed)
 
     params = {
         "max_depth": 5,
@@ -720,7 +1188,9 @@ def train_xgboost_oracle(league: str = "Standard", items_per_base: int = 500) ->
     )
 
     # Avaliação
-    preds = model.predict(dtest)
+    preds_log = model.predict(dtest)
+    preds = invert_target_log1p(preds_log)
+    preds = np.maximum(preds, 0.0)
     baseline_median = float(y_train.median())
     metrics = evaluate_predictions(y_test, preds, baseline_value=baseline_median)
 
@@ -745,6 +1215,7 @@ def train_xgboost_oracle(league: str = "Standard", items_per_base: int = 500) ->
     # Gravando .xgb final
     os.makedirs("data", exist_ok=True)
     model_path = os.path.join("data", "price_oracle.xgb")
+    model.set_attr(target_transform="log1p")
     model.save_model(model_path)
     print(
         f"\n✅ [SUCESSO] Cérebro atualizado e injetado com Big Data verdadeiro em {model_path}!"
@@ -754,22 +1225,110 @@ def train_xgboost_oracle(league: str = "Standard", items_per_base: int = 500) ->
 if __name__ == "__main__":
     import typer
 
-    app = typer.Typer()
+    app = typer.Typer(help="Treino do Oracle com coleta incremental e modo offline.")
 
-    @app.command()
-    def train(
+    default_bases = [
+        "Imbued Wand",
+        "Spine Bow",
+        "Titanium Spirit Shield",
+        "Vaal Regalia",
+        "Hubris Circlet",
+        "Sadist Garb",
+    ]
+
+    @app.command("collect")
+    def collect_cmd(
         league: str = typer.Option("Standard", "--league", "-l", help="PoE league"),
         items_per_base: int = typer.Option(
             500, "--items", "-i", help="Items per base type"
         ),
-        skip_outlier_filter: bool = typer.Option(
-            False, "--skip-outliers", help="Skip IQR outlier removal"
+        dataset: Optional[str] = typer.Option(
+            None, "--dataset", help="JSONL output path"
         ),
-        skip_stale_filter: bool = typer.Option(
-            False, "--skip-stale", help="Skip stale listing filter"
+        checkpoint: Optional[str] = typer.Option(
+            None, "--checkpoint", help="Checkpoint path"
         ),
-    ):
-        """Train the XGBoost price oracle."""
-        train_xgboost_oracle(league=league, items_per_base=items_per_base)
+        resume: bool = typer.Option(
+            False, "--resume", help="Resume collection from checkpoint"
+        ),
+        chunk_size: int = typer.Option(100, "--chunk-size", help="Flush chunk size"),
+    ) -> None:
+        dataset_path = dataset or default_dataset_path(league)
+        checkpoint_path = checkpoint or default_checkpoint_path(league)
+        stats = collect_training_data_incremental(
+            target_bases=default_bases,
+            items_per_base=items_per_base,
+            league=league,
+            dataset_path=dataset_path,
+            checkpoint_path=checkpoint_path,
+            resume=resume,
+            chunk_size=chunk_size,
+        )
+        print(f"✅ [Collect] Dataset: {dataset_path}")
+        print(
+            f"   Novos registros gravados: {stats['written']} | Total IDs únicos: {stats['seen_total']}"
+        )
+
+    @app.command("train")
+    def train_cmd(
+        league: str = typer.Option("Standard", "--league", "-l", help="PoE league"),
+        items_per_base: int = typer.Option(
+            500, "--items", "-i", help="Items per base type"
+        ),
+        dataset: Optional[str] = typer.Option(
+            None,
+            "--dataset",
+            help="JSONL dataset path (offline mode; default path is league-based)",
+        ),
+    ) -> None:
+        dataset_path = dataset or default_dataset_path(league)
+        if not os.path.exists(dataset_path):
+            print(
+                f"❌ Dataset não encontrado para treino offline: {dataset_path}. "
+                "Execute o comando collect primeiro."
+            )
+            raise typer.Exit(code=1)
+        train_xgboost_oracle(
+            league=league,
+            items_per_base=items_per_base,
+            dataset_path=dataset_path,
+        )
+
+    @app.command("collect-train")
+    def collect_train_cmd(
+        league: str = typer.Option("Standard", "--league", "-l", help="PoE league"),
+        items_per_base: int = typer.Option(
+            500, "--items", "-i", help="Items per base type"
+        ),
+        dataset: Optional[str] = typer.Option(
+            None, "--dataset", help="JSONL dataset path"
+        ),
+        checkpoint: Optional[str] = typer.Option(
+            None, "--checkpoint", help="Checkpoint path"
+        ),
+        resume: bool = typer.Option(
+            False, "--resume", help="Resume collection from checkpoint"
+        ),
+        chunk_size: int = typer.Option(100, "--chunk-size", help="Flush chunk size"),
+    ) -> None:
+        dataset_path = dataset or default_dataset_path(league)
+        checkpoint_path = checkpoint or default_checkpoint_path(league)
+        collect_training_data_incremental(
+            target_bases=default_bases,
+            items_per_base=items_per_base,
+            league=league,
+            dataset_path=dataset_path,
+            checkpoint_path=checkpoint_path,
+            resume=resume,
+            chunk_size=chunk_size,
+        )
+        train_xgboost_oracle(
+            league=league,
+            items_per_base=items_per_base,
+            dataset_path=dataset_path,
+        )
+
+    if len(sys.argv) > 1 and sys.argv[1].startswith("-"):
+        sys.argv.insert(1, "collect-train")
 
     app()
