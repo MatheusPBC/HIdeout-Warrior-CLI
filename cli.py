@@ -83,6 +83,7 @@ def _render_scan_table(results, full=False, title=""):
     table.add_column("Preço", justify="right", style="red")
     table.add_column("Valor ML", justify="right", style="magenta")
     table.add_column("Lucro", justify="right", style="bold")
+    table.add_column("Trusted", justify="right", style="blue")
     table.add_column("Score", justify="right", style="green")
     table.add_column("Flags", style="dim")
 
@@ -111,6 +112,7 @@ def _render_scan_table(results, full=False, title=""):
 
     for result in results:
         profit = result.get("profit", 0.0)
+        trusted_profit = result.get("trusted_profit", 0.0)
         profit_style = (
             "bold green" if profit > 50.0 else "yellow" if profit > 0 else "white"
         )
@@ -120,6 +122,7 @@ def _render_scan_table(results, full=False, title=""):
             f"{result.get('listed_price', 0.0):.1f}c",
             f"{result.get('ml_value', 0.0):.1f}c",
             f"[{profit_style}]{profit:.1f}c[/]",
+            f"{trusted_profit:.1f}c",
             f"{result.get('score', 0.0):.1f}",
             flags,
         ]
@@ -136,9 +139,24 @@ def _render_kpi_panel(stats: ScanStats):
     table.add_column("Métrica", style="cyan", justify="left")
     table.add_column("Valor", style="white", justify="right")
     table.add_row("Liga Resolvida", f"[bold]{stats.resolved_league or 'N/A'}[/bold]")
+    table.add_row("Perfil", f"[bold]{stats.scan_profile}[/bold]")
     table.add_row("Total Encontrado", f"[bold]{stats.total_found}[/bold]")
     table.add_row("Total Avaliados", f"[bold]{stats.total_evaluated}[/bold]")
     table.add_row("Descartados Anti-Fix", f"[yellow]{stats.filtered_anti_fix}[/yellow]")
+    if stats.scan_profile == "open_market":
+        table.add_row("Filtro Open: confiança", f"[yellow]{stats.filtered_open_confidence}[/yellow]")
+        table.add_row(
+            "Filtro Open: barato + confiança",
+            f"[yellow]{stats.filtered_open_cheap_low_confidence}[/yellow]",
+        )
+        table.add_row(
+            "Filtro Open: barato + lucro",
+            f"[yellow]{stats.filtered_open_cheap_low_profit}[/yellow]",
+        )
+        table.add_row(
+            "Filtro Open: barato + stale",
+            f"[yellow]{stats.filtered_open_cheap_stale}[/yellow]",
+        )
     table.add_row("Moeda Inválida", f"[yellow]{stats.skipped_invalid_currency}[/yellow]")
     table.add_row("Lucro Médio", f"[green]{stats.avg_profit:.1f}c[/green]")
     table.add_row("Lucro Máximo", f"[bold green]{stats.max_profit:.1f}c[/bold green]")
@@ -175,6 +193,23 @@ def _render_no_results_message(min_profit: float, anti_fix: bool, safe_buy: bool
         filter_reasons.append(
             f"- anti-fix descartou {stats.filtered_anti_fix} itens suspeitos"
         )
+    if stats.scan_profile == "open_market":
+        if stats.filtered_open_confidence > 0:
+            filter_reasons.append(
+                f"- perfil aberto descartou {stats.filtered_open_confidence} itens por confiança muito baixa"
+            )
+        if stats.filtered_open_cheap_low_confidence > 0:
+            filter_reasons.append(
+                "- perfil aberto bloqueou itens muito baratos com confiança insuficiente"
+            )
+        if stats.filtered_open_cheap_low_profit > 0:
+            filter_reasons.append(
+                "- perfil aberto removeu itens baratos com lucro implícito fraco"
+            )
+        if stats.filtered_open_cheap_stale > 0:
+            filter_reasons.append(
+                "- perfil aberto removeu itens baratos antigos demais"
+            )
     if safe_buy:
         filter_reasons.append(
             "- safe-buy exige confiança alta, listing recente e preço mínimo"
@@ -341,7 +376,7 @@ def craft_path(
 
 @app.command()
 def scan(
-    item_type: str = typer.Option("", "--type", help="Nome base do item (ex: 'Imbued Wand')"),
+    item_type: str = typer.Option("", "--type", help="Nome base do item; sem --type o scan aberto prioriza confiança"),
     ilvl: int = typer.Option(1, help="Item Level mínimo"),
     rarity: str = typer.Option("rare", help="Raridade do item (ex: rare, unique, normal)"),
     max_items: int = typer.Option(30, min=1, help="Quantidade máxima de itens para avaliar"),
@@ -349,12 +384,12 @@ def scan(
     league: str = typer.Option("auto", "-l", help="Liga do Path of Exile ou 'auto'"),
     min_profit: float = typer.Option(0.0, "--min-profit", help="Lucro mínimo em Chaos"),
     anti_fix: bool = typer.Option(True, "--anti-fix/--no-anti-fix", help="Ativar filtro anti-price-fixing"),
-    safe_buy: bool = typer.Option(False, "--safe-buy/--no-safe-buy", help="Modo conservador para compra"),
+    safe_buy: bool = typer.Option(False, "--safe-buy/--no-safe-buy", help="Modo extra-conservador por cima do perfil normal"),
     output: str = typer.Option("", "--output", "-o", help="Salvar saída em arquivo"),
     full: bool = typer.Option(False, "--full", help="Tabela detalhada com colunas extras"),
     output_format: str = typer.Option("table", "--format", help="Formato: table|json|csv|jsonl"),
 ):
-    """Scanner de arbitragem com score explícito, confiança e flags de risco."""
+    """Scanner de arbitragem; sem --type prioriza confiança, com --type fica mais permissivo."""
     from rich.status import Status
 
     valid_formats = ["table", "json", "csv", "jsonl"]
@@ -475,3 +510,4 @@ def rog_assist():
 
 if __name__ == "__main__":
     app()
+

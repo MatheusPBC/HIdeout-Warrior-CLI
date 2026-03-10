@@ -10,12 +10,22 @@ O projeto continua `TOS-safe`: usa apenas APIs publicas e analise local. Nao aut
 ## Fluxos principais
 
 ### 1. `scan`
-Busca itens na trade API, resolve a liga automaticamente por padrao, calcula valuation, confiança, lucro e score, e devolve oportunidades ranqueadas.
+Busca itens na trade API, resolve a liga automaticamente por padrao, calcula valuation, confianca, lucro, `trusted_profit` e score, e devolve oportunidades ranqueadas.
+
+Sem `--type`, o scan entra em modo aberto e prioriza confianca: listings baratos e pouco confiaveis sao filtrados antes do ranking.
+
+Com `--type`, o scan fica mais permissivo para explorar bases especificas.
 
 Exemplo:
 
 ```bash
 python cli.py scan --type "Imbued Wand" --ilvl 84 --min-profit 20
+```
+
+Modo aberto:
+
+```bash
+python cli.py scan -l Mirage --max-items 20
 ```
 
 ### 2. `flip-plan`

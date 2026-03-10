@@ -147,7 +147,11 @@ class FlipAdvisor:
         budget: float,
     ) -> List[CraftPlan]:
         plans: List[CraftPlan] = []
-        ranked = sorted(opportunities, key=lambda opp: (opp.score, opp.profit), reverse=True)
+        ranked = sorted(
+            opportunities,
+            key=lambda opp: (opp.score, opp.trusted_profit, opp.profit),
+            reverse=True,
+        )
 
         for opportunity in ranked[:10]:
             plan = self._build_plan(opportunity, budget)
@@ -362,3 +366,4 @@ class FlipAdvisor:
         if not steps:
             return 0.5
         return sum(step.probability for step in steps) / len(steps)
+

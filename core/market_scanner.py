@@ -44,9 +44,14 @@ class ScanStats:
     filtered_safe_buy_confidence: int = 0
     filtered_safe_buy_age: int = 0
     filtered_safe_buy_price: int = 0
+    filtered_open_confidence: int = 0
+    filtered_open_cheap_low_confidence: int = 0
+    filtered_open_cheap_low_profit: int = 0
+    filtered_open_cheap_stale: int = 0
     avg_profit: float = 0.0
     max_profit: float = 0.0
     avg_score: float = 0.0
+    scan_profile: str = "open_market"
     resolved_league: str = ""
 
 
@@ -75,6 +80,7 @@ class ScanOpportunity:
     influences: List[str] = field(default_factory=list)
     explicit_mods: List[str] = field(default_factory=list)
     implicit_mods: List[str] = field(default_factory=list)
+    trusted_profit: float = 0.0
     risk_flags: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -106,6 +112,7 @@ class ScanOpportunity:
             influences=data.get("influences", []),
             explicit_mods=data.get("explicit_mods", []),
             implicit_mods=data.get("implicit_mods", []),
+            trusted_profit=data.get("trusted_profit", 0.0),
             risk_flags=data.get("risk_flags", []),
         )
 
@@ -209,7 +216,7 @@ class OnDemandScanner:
         ninja_key = ninja_key_map.get(currency, currency.title() + " Orb")
         rate = self.currency_rates.get(ninja_key)
         if rate is None:
-            logger.warning("Moeda não encontrada nas taxas: %s (%s)", currency, ninja_key)
+            logger.warning("Moeda nao encontrada nas taxas: %s (%s)", currency, ninja_key)
             return None
 
         return amount * rate
@@ -284,27 +291,50 @@ class OnDemandScanner:
         ml_value: float,
         ml_confidence: float,
         risk_flags: List[str],
-    ) -> float:
+    ) -> Tuple[float, float]:
         if listed_price <= 0:
-            return 0.0
+            return (0.0, 0.0)
 
         profit = ml_value - listed_price
         relative_discount = max(profit / max(listed_price, 1.0), 0.0)
+        trusted_profit = max(profit, 0.0) * ml_confidence
 
         score = 0.0
-        score += max(profit, 0.0) * 0.45
-        score += min(relative_discount, 5.0) * 12.0
-        score += ml_confidence * 35.0
+        score += trusted_profit * 1.05
+        score += min(max(profit, 0.0), 120.0) * 0.18
+        score += min(relative_discount, 3.0) * 5.5
+        score += ml_confidence * 28.0
 
         penalties = {
             "price_fix_suspected": 45.0,
-            "stale_listing": 8.0,
-            "low_confidence": 10.0,
-            "cheap_listing": 4.0,
-            "corrupted": 6.0,
+            "stale_listing": 14.0,
+            "low_confidence": 18.0,
+            "cheap_listing": 12.0,
+            "corrupted": 10.0,
         }
         score -= sum(penalties.get(flag, 0.0) for flag in risk_flags)
-        return round(max(score, 0.0), 1)
+        if "cheap_listing" in risk_flags and 0.45 <= ml_confidence < 0.60:
+            score -= 12.0
+        return (round(max(score, 0.0), 1), round(trusted_profit, 1))
+
+    def _scan_profile(self, item_class: str) -> str:
+        return "targeted" if item_class.strip() else "open_market"
+
+    def _open_market_filter_reason(self, opportunity: ScanOpportunity) -> Optional[str]:
+        if opportunity.ml_confidence < 0.45:
+            return "filtered_open_confidence"
+
+        if opportunity.listed_price < 5.0:
+            if opportunity.ml_confidence < 0.60:
+                return "filtered_open_cheap_low_confidence"
+            if opportunity.profit < 20.0:
+                return "filtered_open_cheap_low_profit"
+
+            age_hours = self._listing_age_hours(opportunity.indexed_at)
+            if age_hours is not None and age_hours > 12.0:
+                return "filtered_open_cheap_stale"
+
+        return None
 
     def _build_listing_snapshot(self, item_json: dict, query_id: str) -> Optional[ListingSnapshot]:
         listing = item_json.get("listing", {})
@@ -363,7 +393,7 @@ class OnDemandScanner:
         valuation_gap = round(ml_value - snapshot.listed_price, 1)
         relative_discount = round(valuation_gap / max(snapshot.listed_price, 1.0), 2)
         risk_flags = self._risk_flags(snapshot, ml_value, ml_confidence, stale_hours)
-        score = self._compute_opportunity_score(
+        score, trusted_profit = self._compute_opportunity_score(
             snapshot.listed_price,
             ml_value,
             ml_confidence,
@@ -394,6 +424,7 @@ class OnDemandScanner:
             influences=snapshot.influences,
             explicit_mods=snapshot.explicit_mods,
             implicit_mods=snapshot.implicit_mods,
+            trusted_profit=trusted_profit,
             risk_flags=risk_flags,
         )
 
@@ -408,13 +439,20 @@ class OnDemandScanner:
         stale_hours: float = 48.0,
         safe_buy: bool = False,
     ) -> Tuple[List[ScanOpportunity], ScanStats]:
+        scan_profile = self._scan_profile(item_class)
         if max_items <= 0:
-            return [], ScanStats(resolved_league=self.api_client.league)
+            return [], ScanStats(
+                resolved_league=self.api_client.league,
+                scan_profile=scan_profile,
+            )
 
         query = self.build_trade_query(item_class, ilvl_min, rarity, False)
         query_id, result_ids = self.api_client.search_items(query)
         if not query_id or not result_ids:
-            return [], ScanStats(resolved_league=self.api_client.league)
+            return [], ScanStats(
+                resolved_league=self.api_client.league,
+                scan_profile=scan_profile,
+            )
 
         target_ids = result_ids[: min(max_items, len(result_ids))]
         opportunities: List[ScanOpportunity] = []
@@ -425,6 +463,10 @@ class OnDemandScanner:
         filtered_safe_buy_confidence = 0
         filtered_safe_buy_age = 0
         filtered_safe_buy_price = 0
+        filtered_open_confidence = 0
+        filtered_open_cheap_low_confidence = 0
+        filtered_open_cheap_low_profit = 0
+        filtered_open_cheap_stale = 0
 
         for i in range(0, len(target_ids), 10):
             details = self.api_client.fetch_item_details(target_ids[i : i + 10], query_id)
@@ -447,6 +489,21 @@ class OnDemandScanner:
                     filtered_anti_fix += 1
                     continue
 
+                if scan_profile == "open_market":
+                    open_market_reason = self._open_market_filter_reason(opportunity)
+                    if open_market_reason == "filtered_open_confidence":
+                        filtered_open_confidence += 1
+                        continue
+                    if open_market_reason == "filtered_open_cheap_low_confidence":
+                        filtered_open_cheap_low_confidence += 1
+                        continue
+                    if open_market_reason == "filtered_open_cheap_low_profit":
+                        filtered_open_cheap_low_profit += 1
+                        continue
+                    if open_market_reason == "filtered_open_cheap_stale":
+                        filtered_open_cheap_stale += 1
+                        continue
+
                 if safe_buy:
                     if opportunity.ml_confidence < 0.7:
                         filtered_safe_buy_confidence += 1
@@ -465,7 +522,10 @@ class OnDemandScanner:
 
                 opportunities.append(opportunity)
 
-        opportunities.sort(key=lambda opp: (opp.score, opp.profit), reverse=True)
+        opportunities.sort(
+            key=lambda opp: (opp.score, opp.trusted_profit, opp.profit),
+            reverse=True,
+        )
 
         stats = ScanStats(
             total_found=len(result_ids),
@@ -476,6 +536,10 @@ class OnDemandScanner:
             filtered_safe_buy_confidence=filtered_safe_buy_confidence,
             filtered_safe_buy_age=filtered_safe_buy_age,
             filtered_safe_buy_price=filtered_safe_buy_price,
+            filtered_open_confidence=filtered_open_confidence,
+            filtered_open_cheap_low_confidence=filtered_open_cheap_low_confidence,
+            filtered_open_cheap_low_profit=filtered_open_cheap_low_profit,
+            filtered_open_cheap_stale=filtered_open_cheap_stale,
             avg_profit=round(sum(o.profit for o in opportunities) / len(opportunities), 1)
             if opportunities
             else 0.0,
@@ -483,6 +547,7 @@ class OnDemandScanner:
             avg_score=round(sum(o.score for o in opportunities) / len(opportunities), 1)
             if opportunities
             else 0.0,
+            scan_profile=scan_profile,
             resolved_league=self.api_client.league,
         )
 
