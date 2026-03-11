@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import sqlite3
+import json
 
 from scripts.train_oracle import (
     calculate_feature_overlap,
@@ -9,7 +10,10 @@ from scripts.train_oracle import (
     fetch_training_data_from_parquet,
     fetch_training_data_from_sqlite,
     load_training_dataframe,
+    persist_model_metadata,
+    run_quality_gates,
     split_dataset_for_training,
+    TrainingGateError,
 )
 
 
@@ -162,3 +166,78 @@ def test_fetch_training_data_from_parquet_accepts_partitioned_directory(
 
     assert captured_path["value"] == str(parquet_dir)
     assert result.equals(expected)
+
+
+def test_run_quality_gates_fails_with_invalid_dataset() -> None:
+    df = pd.DataFrame(
+        {
+            "item_family": ["generic"] * 50,
+            "price_chaos": [10.0] * 50,
+        }
+    )
+
+    with pytest.raises(TrainingGateError):
+        run_quality_gates(df)
+
+
+def test_run_quality_gates_passes_with_valid_dataset() -> None:
+    rows = 50
+    df = pd.DataFrame(
+        {
+            "item_family": ["wand_caster"] * 25 + ["generic"] * 25,
+            "price_chaos": np.linspace(10.0, 120.0, rows),
+            "ilvl": np.arange(rows),
+            "has_life": [0.0, 1.0] * 25,
+        }
+    )
+
+    report = run_quality_gates(df)
+
+    assert report["rows"] == 50
+    assert report["target_unique"] >= 10
+    assert report["max_family_rows"] >= 20
+
+
+def test_persist_model_metadata_writes_expected_structure(tmp_path) -> None:
+    df = pd.DataFrame(
+        {
+            "snapshot_date": ["2026-03-11"] * 3,
+            "item_family": ["wand_caster", "wand_caster", "generic"],
+            "price_chaos": [12.0, 18.0, 22.0],
+        }
+    )
+    audit = {"rows": 3, "exact_duplicates": 0}
+    reports = [
+        {
+            "family": "wand_caster",
+            "model_path": "data/price_oracle_wand_caster.xgb",
+            "model_sha256": "abc123",
+            "feature_schema": ["ilvl", "has_spell_damage"],
+            "feature_schema_hash": "def456",
+            "split_strategy": "temporal",
+            "rows_total": 30,
+            "rows_train": 24,
+            "rows_test": 6,
+            "metrics": {"rmse": 10.1, "mae": 7.2},
+        }
+    ]
+
+    metadata_path = persist_model_metadata(
+        source="parquet",
+        league="Standard",
+        items_per_base=500,
+        trained_at_utc="2026-03-11T12:00:00Z",
+        dataset_df=df,
+        dataset_audit=audit,
+        model_reports=reports,
+        output_dir=tmp_path / "model_metadata",
+    )
+
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata_path.exists()
+    assert payload["run"]["source"] == "parquet"
+    assert payload["dataset"]["rows"] == 3
+    assert payload["dataset"]["snapshot_date"] == "2026-03-11"
+    assert "dataset_hash" in payload["dataset"]
+    assert payload["models"][0]["family"] == "wand_caster"
+    assert "model_sha256" in payload["models"][0]

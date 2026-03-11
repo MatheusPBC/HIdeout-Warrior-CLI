@@ -1,7 +1,8 @@
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
@@ -19,6 +20,10 @@ from core.api_integrator import MarketAPIClient
 from core.item_normalizer import ITEM_FAMILIES, normalize_trade_item
 from core.meta_analyzer import LadderAnalyzer, MetaScores, calculate_meta_utility_score
 from core.ml_oracle import FAMILY_FEATURE_SCHEMAS, PricePredictor
+
+
+class TrainingGateError(Exception):
+    pass
 
 
 def _extract_price_chaos(listing: dict, currency_rates: dict) -> Optional[float]:
@@ -195,6 +200,142 @@ def audit_dataset(df: pd.DataFrame, target_col: str = "price_chaos") -> Dict[str
     feature_cols = _feature_columns(df, target_col=target_col)
     exact_duplicates = int(df.duplicated(subset=feature_cols + [target_col]).sum())
     return {"rows": int(len(df)), "exact_duplicates": exact_duplicates}
+
+
+def run_quality_gates(
+    df: pd.DataFrame,
+    target_col: str = "price_chaos",
+    min_rows: int = 50,
+    min_unique_targets: int = 10,
+    max_duplicate_ratio: float = 0.20,
+    min_family_rows: int = 20,
+) -> Dict[str, Any]:
+    if target_col not in df.columns:
+        raise TrainingGateError(
+            f"Quality gate falhou: target obrigatório ausente ({target_col})."
+        )
+
+    target_series = cast(pd.Series, df[target_col])
+    if target_series.isna().any():
+        raise TrainingGateError("Quality gate falhou: target price_chaos contém NaN.")
+    if (target_series <= 0).any():
+        raise TrainingGateError(
+            "Quality gate falhou: target price_chaos deve ser estritamente positivo."
+        )
+
+    rows = int(len(df))
+    if rows < min_rows:
+        raise TrainingGateError(
+            f"Quality gate falhou: volume insuficiente ({rows} < {min_rows})."
+        )
+
+    unique_targets = int(target_series.nunique(dropna=True))
+    target_std = float(np.std(target_series.to_numpy(dtype=float), ddof=0))
+    if unique_targets < min_unique_targets:
+        raise TrainingGateError(
+            "Quality gate falhou: baixa variância do target "
+            f"(nunique={unique_targets} < {min_unique_targets})."
+        )
+    if target_std <= 0:
+        raise TrainingGateError(
+            "Quality gate falhou: desvio padrão do target deve ser > 0."
+        )
+
+    audit = audit_dataset(df, target_col=target_col)
+    duplicate_ratio = float(audit["exact_duplicates"]) / float(rows) if rows else 0.0
+    if duplicate_ratio > max_duplicate_ratio:
+        raise TrainingGateError(
+            "Quality gate falhou: duplicatas exatas acima do limite "
+            f"({duplicate_ratio:.1%} > {max_duplicate_ratio:.1%})."
+        )
+
+    if "item_family" not in df.columns:
+        raise TrainingGateError(
+            "Quality gate falhou: coluna item_family ausente para validação por família."
+        )
+    family_counts = df["item_family"].value_counts(dropna=False)
+    max_family_count = int(family_counts.max()) if not family_counts.empty else 0
+    if max_family_count < min_family_rows:
+        raise TrainingGateError(
+            "Quality gate falhou: nenhuma família com volume mínimo de treino "
+            f"({max_family_count} < {min_family_rows})."
+        )
+
+    return {
+        "rows": rows,
+        "target_unique": unique_targets,
+        "target_std": target_std,
+        "duplicate_ratio": duplicate_ratio,
+        "max_family_rows": max_family_count,
+        "audit": audit,
+    }
+
+
+def _hash_dataframe(df: pd.DataFrame) -> str:
+    if df.empty:
+        return hashlib.sha256(b"empty").hexdigest()
+    normalized = df.copy()
+    normalized = normalized.reindex(sorted(normalized.columns), axis=1)
+    payload = cast(
+        str,
+        normalized.to_json(orient="records", date_format="iso", default_handler=str),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _hash_file(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with file_path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8192), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _hash_schema(feature_schema: List[str]) -> str:
+    payload = json.dumps(feature_schema, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def persist_model_metadata(
+    source: str,
+    league: str,
+    items_per_base: int,
+    trained_at_utc: str,
+    dataset_df: pd.DataFrame,
+    dataset_audit: Dict[str, Any],
+    model_reports: List[Dict[str, Any]],
+    output_dir: Path = Path("data/model_metadata"),
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    metadata_path = output_dir / f"oracle_training_{run_suffix}.json"
+
+    snapshot_date: Optional[str] = None
+    if "snapshot_date" in dataset_df.columns:
+        non_null = dataset_df["snapshot_date"].dropna()
+        if not non_null.empty:
+            snapshot_date = str(non_null.iloc[0])
+
+    payload = {
+        "run": {
+            "trained_at_utc": trained_at_utc,
+            "source": source,
+            "league": league,
+            "items_per_base": items_per_base,
+        },
+        "dataset": {
+            "rows": int(len(dataset_df)),
+            "snapshot_date": snapshot_date,
+            "dataset_hash": _hash_dataframe(dataset_df),
+            "audit": dataset_audit,
+        },
+        "models": model_reports,
+    }
+    metadata_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return metadata_path
 
 
 def split_dataset_for_training(
@@ -632,10 +773,15 @@ def _train_family_model(
     model.save_model(model_path)
     return {
         "family": family,
-        "rows": len(family_df),
+        "rows_total": int(len(family_df)),
+        "rows_train": int(len(x_train)),
+        "rows_test": int(len(x_test)),
+        "feature_schema": feature_columns,
+        "feature_schema_hash": _hash_schema(feature_columns),
         "split_strategy": split_strategy,
         "metrics": metrics,
         "model_path": str(model_path),
+        "model_sha256": _hash_file(model_path),
     }
 
 
@@ -647,6 +793,12 @@ def train_xgboost_oracle(
     parquet_path: str = "data/firehose.parquet",
 ) -> None:
     print("[Training] Iniciando treino por família")
+    trained_at_utc = (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
     target_bases = [
         "Imbued Wand",
         "Titanium Spirit Shield",
@@ -663,12 +815,19 @@ def train_xgboost_oracle(
         sqlite_path=sqlite_path,
         parquet_path=parquet_path,
     )
-    if len(df) < 50:
-        print("Dados insuficientes extraídos.")
+    try:
+        gate_report = run_quality_gates(df)
+    except TrainingGateError as exc:
+        print(f"[Training][Abort] {exc}")
         sys.exit(1)
 
-    audit = audit_dataset(df)
-    print(f"[Audit] rows={audit['rows']} exact_duplicates={audit['exact_duplicates']}")
+    audit = gate_report["audit"]
+    print(
+        "[Audit] "
+        f"rows={audit['rows']} "
+        f"exact_duplicates={audit['exact_duplicates']} "
+        f"duplicate_ratio={gate_report['duplicate_ratio']:.1%}"
+    )
 
     output_dir = Path("data")
     trained_reports: List[Dict[str, Any]] = []
@@ -685,8 +844,25 @@ def train_xgboost_oracle(
     for report in trained_reports:
         metrics = report["metrics"]
         print(
-            f"[Family {report['family']}] rows={report['rows']} rmse={metrics['rmse']:.2f} mae={metrics['mae']:.2f} model={report['model_path']}"
+            f"[Family {report['family']}] rows={report['rows_total']} rmse={metrics['rmse']:.2f} mae={metrics['mae']:.2f} model={report['model_path']}"
         )
+
+    metadata_path = persist_model_metadata(
+        source=source,
+        league=league,
+        items_per_base=items_per_base,
+        trained_at_utc=trained_at_utc,
+        dataset_df=df,
+        dataset_audit={
+            **audit,
+            "duplicate_ratio": gate_report["duplicate_ratio"],
+            "target_unique": gate_report["target_unique"],
+            "target_std": gate_report["target_std"],
+            "max_family_rows": gate_report["max_family_rows"],
+        },
+        model_reports=trained_reports,
+    )
+    print(f"[Metadata] Salvo em {metadata_path}")
 
 
 if __name__ == "__main__":

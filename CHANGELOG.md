@@ -24,6 +24,10 @@
 - Ajustado o `train_oracle` para aceitar `source=parquet` com entrada em arquivo único ou diretório particionado.
 - Adicionados/atualizados testes em `tests/test_training_snapshot_job.py` e `tests/test_train_oracle.py`.
 - Validação executada neste ciclo: `pytest` alvo com **6 passed** e suíte completa com **44 passed**.
+- Adicionados quality gates no `scripts/train_oracle.py` antes do treino: presença/validade de `price_chaos`, volume mínimo global, variância mínima do target, limite de duplicatas exatas e mínimo de linhas por família.
+- Implementada persistência de metadados por execução em `data/model_metadata/`, incluindo hash do dataset, auditoria, estratégia de split, schema de features e hash SHA256 dos modelos `.xgb` sem alterar o path dos artefatos existentes.
+- Atualizados os testes em `tests/test_train_oracle.py` para cobrir falha/sucesso dos quality gates e estrutura básica do JSON de metadata.
+- Validação executada nesta fase: `pytest -q tests/test_train_oracle.py` com **8 passed** e `pytest -q` com **47 passed**.
 
 ## 2026-03-10
 
