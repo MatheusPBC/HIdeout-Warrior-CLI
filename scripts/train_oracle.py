@@ -1,6 +1,8 @@
 import os
+import sqlite3
 import sys
 from datetime import datetime, timedelta
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
@@ -43,10 +45,15 @@ def _extract_price_chaos(listing: dict, currency_rates: dict) -> Optional[float]
 
 
 def parse_trade_item_to_features(
-    item_data: dict, currency_rates: dict, meta_scores: Optional[MetaScores] = None
+    item_data: dict,
+    currency_rates: dict,
+    meta_scores: Optional[MetaScores] = None,
+    listed_price_chaos_override: Optional[float] = None,
 ) -> Optional[dict]:
     listing = item_data.get("listing", {})
-    listed_price = _extract_price_chaos(listing, currency_rates)
+    listed_price = listed_price_chaos_override
+    if listed_price is None:
+        listed_price = _extract_price_chaos(listing, currency_rates)
     if listed_price is None:
         return None
 
@@ -61,7 +68,9 @@ def parse_trade_item_to_features(
         return None
 
     predictor = PricePredictor()
-    feature_frame = predictor._build_inference_dataframe(normalized, family=normalized.item_family)
+    feature_frame = predictor._build_inference_dataframe(
+        normalized, family=normalized.item_family
+    )
     feature_row = feature_frame.iloc[0].to_dict()
 
     meta_utility_score = 0.0
@@ -158,9 +167,14 @@ def remove_stale_listings(
     def is_suspicious(row: pd.Series) -> bool:
         if not is_listing_stale(str(row.get("listed_at", "")), hours_threshold):
             return False
-        return row["signal_count"] >= min_signal_count and row["price_chaos"] <= low_price_threshold
+        return (
+            row["signal_count"] >= min_signal_count
+            and row["price_chaos"] <= low_price_threshold
+        )
 
-    return tmp.loc[~tmp.apply(is_suspicious, axis=1)].drop(columns=["signal_count"], errors="ignore")
+    return tmp.loc[~tmp.apply(is_suspicious, axis=1)].drop(
+        columns=["signal_count"], errors="ignore"
+    )
 
 
 def _feature_columns(df: pd.DataFrame, target_col: str = "price_chaos") -> List[str]:
@@ -243,7 +257,9 @@ def calculate_rmse_by_bucket(
         if int(mask.sum()) == 0:
             bucket_rmse[label] = None
             continue
-        bucket_rmse[label] = float(np.sqrt(mean_squared_error(y_true[mask], y_pred[mask])))
+        bucket_rmse[label] = float(
+            np.sqrt(mean_squared_error(y_true[mask], y_pred[mask]))
+        )
     return bucket_rmse
 
 
@@ -309,16 +325,16 @@ def fetch_training_data(
         TextColumn("({task.completed}/{task.total} iter)"),
     ) as progress:
         total_iterations = len(target_bases) * ((items_per_base + 9) // 10)
-        overall_task = progress.add_task("[cyan]Comunicação com API GGG...", total=total_iterations)
+        overall_task = progress.add_task(
+            "[cyan]Comunicação com API GGG...", total=total_iterations
+        )
 
         for base_type in target_bases:
             query = {
                 "query": {
                     "status": {"option": "online"},
                     "type": base_type,
-                    "filters": {
-                        "trade_filters": {"filters": {"price": {"min": 1}}}
-                    },
+                    "filters": {"trade_filters": {"filters": {"price": {"min": 1}}}},
                 },
                 "sort": {"price": "asc"},
             }
@@ -343,11 +359,199 @@ def fetch_training_data(
     df = pd.DataFrame(dataset)
     if df.empty:
         return df
+    return _apply_training_filters(
+        df,
+        apply_outlier_filter=apply_outlier_filter,
+        apply_stale_filter=apply_stale_filter,
+    )
+
+
+def _apply_training_filters(
+    df: pd.DataFrame,
+    apply_outlier_filter: bool,
+    apply_stale_filter: bool,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
     if apply_outlier_filter and len(df) > 10:
-        df = remove_price_outliers_iqr(df, group_col="base_type", price_col="price_chaos")
+        df = remove_price_outliers_iqr(
+            df, group_col="base_type", price_col="price_chaos"
+        )
     if apply_stale_filter and len(df) > 10:
         df = remove_stale_listings(df, hours_threshold=48.0, min_signal_count=2)
     return df
+
+
+def _trade_item_from_firehose_row(row: sqlite3.Row) -> Optional[dict]:
+    raw_payload = row["raw_item_json"]
+    if not raw_payload:
+        return None
+    try:
+        item_payload = json.loads(raw_payload)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(item_payload, dict):
+        return None
+
+    listing_currency = str(row["price_currency"] or "chaos")
+    listing_amount = float(row["price_amount"] or row["price_chaos"] or 0.0)
+    seller = str(row["account_name"] or item_payload.get("accountName") or "")
+    listed_at = str(row["indexed"] or item_payload.get("indexed") or "")
+
+    return {
+        "listing": {
+            "whisper": "@placeholder hi, I'd like to buy your item",
+            "indexed": listed_at,
+            "account": {"name": seller},
+            "price": {
+                "currency": listing_currency,
+                "amount": listing_amount,
+            },
+        },
+        "item": item_payload,
+    }
+
+
+def fetch_training_data_from_sqlite(
+    db_path: str,
+    apply_outlier_filter: bool = True,
+    apply_stale_filter: bool = True,
+) -> pd.DataFrame:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    dataset: List[dict] = []
+    try:
+        rows = conn.execute(
+            """
+            SELECT raw_item_json, price_chaos, price_currency, price_amount, account_name, indexed
+            FROM stash_events
+            WHERE price_chaos > 0
+            """
+        ).fetchall()
+        for row in rows:
+            item_data = _trade_item_from_firehose_row(row)
+            if item_data is None:
+                continue
+            features = parse_trade_item_to_features(
+                item_data,
+                currency_rates={},
+                meta_scores=None,
+                listed_price_chaos_override=float(row["price_chaos"]),
+            )
+            if features:
+                dataset.append(features)
+    finally:
+        conn.close()
+
+    return _apply_training_filters(
+        pd.DataFrame(dataset),
+        apply_outlier_filter=apply_outlier_filter,
+        apply_stale_filter=apply_stale_filter,
+    )
+
+
+def fetch_training_data_from_parquet(
+    parquet_path: str,
+    apply_outlier_filter: bool = True,
+    apply_stale_filter: bool = True,
+) -> pd.DataFrame:
+    try:
+        frame = pd.read_parquet(parquet_path)
+    except ImportError as exc:
+        raise RuntimeError(
+            "Leitura de Parquet requer engine instalada (pyarrow ou fastparquet)."
+        ) from exc
+
+    if frame.empty:
+        return frame
+
+    if "price_chaos" in frame.columns and "item_family" in frame.columns:
+        return _apply_training_filters(
+            frame.copy(),
+            apply_outlier_filter=apply_outlier_filter,
+            apply_stale_filter=apply_stale_filter,
+        )
+
+    required_raw_columns = {"raw_item_json", "price_chaos"}
+    if not required_raw_columns.issubset(set(frame.columns)):
+        raise ValueError(
+            "Dataset parquet sem colunas suficientes. Esperado features prontas ou raw_item_json + price_chaos."
+        )
+
+    dataset: List[dict] = []
+    for _, row in frame.iterrows():
+        item_payload = row.get("raw_item_json")
+        if not item_payload:
+            continue
+        if isinstance(item_payload, str):
+            try:
+                parsed_payload = json.loads(item_payload)
+            except json.JSONDecodeError:
+                continue
+        elif isinstance(item_payload, dict):
+            parsed_payload = item_payload
+        else:
+            continue
+
+        item_data = {
+            "listing": {
+                "whisper": "@placeholder hi, I'd like to buy your item",
+                "indexed": row.get("indexed", ""),
+                "account": {"name": row.get("account_name", "")},
+                "price": {
+                    "currency": row.get("price_currency", "chaos"),
+                    "amount": float(
+                        row.get("price_amount", row.get("price_chaos", 0.0)) or 0.0
+                    ),
+                },
+            },
+            "item": parsed_payload,
+        }
+        features = parse_trade_item_to_features(
+            item_data,
+            currency_rates={},
+            meta_scores=None,
+            listed_price_chaos_override=float(row.get("price_chaos", 0.0) or 0.0),
+        )
+        if features:
+            dataset.append(features)
+
+    return _apply_training_filters(
+        pd.DataFrame(dataset),
+        apply_outlier_filter=apply_outlier_filter,
+        apply_stale_filter=apply_stale_filter,
+    )
+
+
+def load_training_dataframe(
+    source: str,
+    league: str,
+    items_per_base: int,
+    target_bases: List[str],
+    sqlite_path: str,
+    parquet_path: str,
+) -> pd.DataFrame:
+    if source == "api":
+        return fetch_training_data(
+            target_bases,
+            items_per_base=items_per_base,
+            league=league,
+            apply_outlier_filter=True,
+            apply_stale_filter=True,
+        )
+    if source == "sqlite":
+        return fetch_training_data_from_sqlite(
+            sqlite_path,
+            apply_outlier_filter=True,
+            apply_stale_filter=True,
+        )
+    if source == "parquet":
+        return fetch_training_data_from_parquet(
+            parquet_path,
+            apply_outlier_filter=True,
+            apply_stale_filter=True,
+        )
+    raise ValueError(f"Fonte de treino inválida: {source}")
 
 
 def _family_feature_columns(family: str) -> List[str]:
@@ -367,14 +571,24 @@ def _train_family_model(
 
     feature_columns = _family_feature_columns(family)
     context_columns = [
-        column for column in ("listed_at", "base_type", "item_family") if column in family_df.columns
+        column
+        for column in ("listed_at", "base_type", "item_family")
+        if column in family_df.columns
     ]
-    available_feature_columns = [column for column in feature_columns if column in family_df.columns]
+    available_feature_columns = [
+        column for column in feature_columns if column in family_df.columns
+    ]
     training_columns = available_feature_columns + context_columns + ["price_chaos"]
     training_df = family_df.loc[:, training_columns].copy()
 
-    x_train, x_test, y_train, y_test, split_strategy = split_dataset_for_training(training_df)
-    leakage_columns = [col for col in ("listed_at", "base_type", "item_family") if col in x_train.columns]
+    x_train, x_test, y_train, y_test, split_strategy = split_dataset_for_training(
+        training_df
+    )
+    leakage_columns = [
+        col
+        for col in ("listed_at", "base_type", "item_family")
+        if col in x_train.columns
+    ]
     x_train = x_train.drop(columns=leakage_columns, errors="ignore")
     x_test = x_test.drop(columns=leakage_columns, errors="ignore")
     for column in feature_columns:
@@ -401,7 +615,9 @@ def _train_family_model(
         verbose_eval=False,
     )
     preds = model.predict(dtest)
-    metrics = evaluate_predictions(y_test, preds, baseline_value=float(y_train.median()))
+    metrics = evaluate_predictions(
+        y_test, preds, baseline_value=float(y_train.median())
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     model_path = output_dir / f"price_oracle_{family}.xgb"
     model.save_model(model_path)
@@ -414,7 +630,13 @@ def _train_family_model(
     }
 
 
-def train_xgboost_oracle(league: str = "Standard", items_per_base: int = 500) -> None:
+def train_xgboost_oracle(
+    league: str = "Standard",
+    items_per_base: int = 500,
+    source: str = "api",
+    sqlite_path: str = "data/firehose.db",
+    parquet_path: str = "data/firehose.parquet",
+) -> None:
     print("[Training] Iniciando treino por família")
     target_bases = [
         "Imbued Wand",
@@ -424,12 +646,13 @@ def train_xgboost_oracle(league: str = "Standard", items_per_base: int = 500) ->
         "Large Cluster Jewel",
         "Opal Ring",
     ]
-    df = fetch_training_data(
-        target_bases,
-        items_per_base=items_per_base,
+    df = load_training_dataframe(
+        source=source,
         league=league,
-        apply_outlier_filter=True,
-        apply_stale_filter=True,
+        items_per_base=items_per_base,
+        target_bases=target_bases,
+        sqlite_path=sqlite_path,
+        parquet_path=parquet_path,
     )
     if len(df) < 50:
         print("Dados insuficientes extraídos.")
@@ -465,8 +688,25 @@ if __name__ == "__main__":
     @app.command()
     def train(
         league: str = typer.Option("Standard", "--league", "-l", help="PoE league"),
-        items_per_base: int = typer.Option(500, "--items", "-i", help="Items per base type"),
+        items_per_base: int = typer.Option(
+            500, "--items", "-i", help="Items per base type"
+        ),
+        source: str = typer.Option(
+            "api", "--source", help="Fonte do dataset: api|sqlite|parquet"
+        ),
+        sqlite_path: str = typer.Option(
+            "data/firehose.db", "--sqlite-path", help="SQLite source path"
+        ),
+        parquet_path: str = typer.Option(
+            "data/firehose.parquet", "--parquet-path", help="Parquet source path"
+        ),
     ):
-        train_xgboost_oracle(league=league, items_per_base=items_per_base)
+        train_xgboost_oracle(
+            league=league,
+            items_per_base=items_per_base,
+            source=source,
+            sqlite_path=sqlite_path,
+            parquet_path=parquet_path,
+        )
 
     app()

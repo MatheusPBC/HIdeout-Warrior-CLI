@@ -11,6 +11,12 @@
 - Identificado na validação real da liga `Mirage` que várias bases usadas no treino estão concentradas em listings de `1c` a `2c`, o que limita a qualidade econômica dos modelos mesmo com o pipeline corrigido.
 - Adicionados testes para normalização compartilhada e atualizados os testes de scanner, valuation e planner para cobrir contratos e comportamento por família.
 - Validação executada neste ciclo: `pytest -q` com **36 passed** e `python -m compileall cli.py core scripts tests` sem erros.
+- Criado o `scripts/firehose_miner.py` com integração à Public Stash API, uso de `next_change_id`, parser de preços (`~b/o`/`~price`), filtro de raros/únicos e persistência idempotente em SQLite.
+- Implementado storage local com as tabelas `stash_events` e `miner_checkpoint`, deduplicação por `(change_id, item_id)` e avanço de checkpoint apenas após commit.
+- Atualizado o `train_oracle` com suporte a `--source api|sqlite|parquet`, mantendo `api` como padrão.
+- Adicionada leitura de treino via `sqlite`/`parquet` com pipeline de features, filtros e split por família.
+- Adicionados novos testes em `tests/test_firehose_miner.py` e atualizações em `tests/test_train_oracle.py`.
+- Validação executada no último ciclo: alvo com `pytest` em **8 passed** e suíte completa em **42 passed**.
 
 ## 2026-03-10
 

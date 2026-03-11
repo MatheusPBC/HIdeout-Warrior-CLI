@@ -1,10 +1,13 @@
 import numpy as np
 import pandas as pd
 import pytest
+import sqlite3
 
 from scripts.train_oracle import (
     calculate_feature_overlap,
     calculate_rmse_by_bucket,
+    fetch_training_data_from_sqlite,
+    load_training_dataframe,
     split_dataset_for_training,
 )
 
@@ -50,3 +53,72 @@ def test_calculate_rmse_by_bucket_with_synthetic_data() -> None:
     assert result["<=50"] == pytest.approx(7.9056941504, rel=1e-6)
     assert result["50-150"] == pytest.approx(22.360679775, rel=1e-6)
     assert result[">150"] == pytest.approx(25.4950975679, rel=1e-6)
+
+
+def test_fetch_training_data_from_sqlite_builds_features(tmp_path) -> None:
+    db_path = tmp_path / "firehose.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE stash_events (
+            raw_item_json TEXT,
+            price_chaos REAL,
+            price_currency TEXT,
+            price_amount REAL,
+            account_name TEXT,
+            indexed TEXT
+        )
+        """
+    )
+    raw_item = {
+        "id": "item-1",
+        "baseType": "Imbued Wand",
+        "ilvl": 84,
+        "explicitMods": ["+#% increased Spell Damage", "+#% increased Cast Speed"],
+        "implicitMods": [],
+        "influences": {},
+        "corrupted": False,
+        "fractured": False,
+    }
+    conn.execute(
+        "INSERT INTO stash_events VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            pd.Series(raw_item).to_json(),
+            40.0,
+            "chaos",
+            40.0,
+            "seller",
+            "2026-03-11T10:00:00Z",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    df = fetch_training_data_from_sqlite(
+        str(db_path), apply_outlier_filter=False, apply_stale_filter=False
+    )
+
+    assert not df.empty
+    assert "price_chaos" in df.columns
+    assert "item_family" in df.columns
+
+
+def test_load_training_dataframe_keeps_api_default_flow(monkeypatch) -> None:
+    expected = pd.DataFrame([{"item_family": "generic", "price_chaos": 10.0}])
+
+    def _fake_fetch_training_data(*_args, **_kwargs):
+        return expected
+
+    monkeypatch.setattr(
+        "scripts.train_oracle.fetch_training_data", _fake_fetch_training_data
+    )
+    result = load_training_dataframe(
+        source="api",
+        league="Standard",
+        items_per_base=10,
+        target_bases=["Imbued Wand"],
+        sqlite_path="data/firehose.db",
+        parquet_path="data/firehose.parquet",
+    )
+
+    assert result.equals(expected)
