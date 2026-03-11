@@ -6,6 +6,7 @@ import sqlite3
 from scripts.train_oracle import (
     calculate_feature_overlap,
     calculate_rmse_by_bucket,
+    fetch_training_data_from_parquet,
     fetch_training_data_from_sqlite,
     load_training_dataframe,
     split_dataset_for_training,
@@ -121,4 +122,43 @@ def test_load_training_dataframe_keeps_api_default_flow(monkeypatch) -> None:
         parquet_path="data/firehose.parquet",
     )
 
+    assert result.equals(expected)
+
+
+def test_fetch_training_data_from_parquet_accepts_partitioned_directory(
+    tmp_path, monkeypatch
+) -> None:
+    parquet_dir = tmp_path / "gold"
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+
+    expected = pd.DataFrame(
+        [
+            {
+                "ilvl": 84,
+                "has_life": 0.0,
+                "has_resist": 1.0,
+                "has_crit": 0.0,
+                "mod_count": 2.0,
+                "open_affixes": 4.0,
+                "meta_utility_score": 0.0,
+                "base_type": "Opal Ring",
+                "listed_at": "2026-03-11T10:00:00Z",
+                "item_family": "accessory_generic",
+                "price_chaos": 25.0,
+            }
+        ]
+    )
+    captured_path = {"value": ""}
+
+    def _fake_read_parquet(path):
+        captured_path["value"] = str(path)
+        return expected.copy()
+
+    monkeypatch.setattr("scripts.train_oracle.pd.read_parquet", _fake_read_parquet)
+
+    result = fetch_training_data_from_parquet(
+        str(parquet_dir), apply_outlier_filter=False, apply_stale_filter=False
+    )
+
+    assert captured_path["value"] == str(parquet_dir)
     assert result.equals(expected)

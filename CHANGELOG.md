@@ -17,6 +17,13 @@
 - Adicionada leitura de treino via `sqlite`/`parquet` com pipeline de features, filtros e split por família.
 - Adicionados novos testes em `tests/test_firehose_miner.py` e atualizações em `tests/test_train_oracle.py`.
 - Validação executada no último ciclo: alvo com `pytest` em **8 passed** e suíte completa em **42 passed**.
+- Criado o script `scripts/build_training_snapshot.py` para materialização de snapshot de treino.
+- Implementado pipeline Bronze/Silver/Gold a partir da tabela SQLite `stash_events`.
+- Aplicado particionamento Hive-style: Bronze por `snapshot_date`+`league`; Silver/Gold por `snapshot_date`+`league`+`item_family`.
+- Adotada deduplicação por camada: Bronze por `event_key`, Silver por `item_id` mais recente e Gold por duplicata exata de `features`+`target`.
+- Ajustado o `train_oracle` para aceitar `source=parquet` com entrada em arquivo único ou diretório particionado.
+- Adicionados/atualizados testes em `tests/test_training_snapshot_job.py` e `tests/test_train_oracle.py`.
+- Validação executada neste ciclo: `pytest` alvo com **6 passed** e suíte completa com **44 passed**.
 
 ## 2026-03-10
 

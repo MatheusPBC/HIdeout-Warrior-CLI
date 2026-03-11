@@ -455,11 +455,20 @@ def fetch_training_data_from_parquet(
     apply_outlier_filter: bool = True,
     apply_stale_filter: bool = True,
 ) -> pd.DataFrame:
+    parquet_target = Path(parquet_path)
+    if not parquet_target.exists():
+        raise FileNotFoundError(f"Caminho parquet não encontrado: {parquet_path}")
+
     try:
-        frame = pd.read_parquet(parquet_path)
+        frame = pd.read_parquet(str(parquet_target))
     except ImportError as exc:
         raise RuntimeError(
             "Leitura de Parquet requer engine instalada (pyarrow ou fastparquet)."
+        ) from exc
+    except Exception as exc:
+        source_kind = "diretório" if parquet_target.is_dir() else "arquivo"
+        raise RuntimeError(
+            f"Falha ao carregar dataset parquet ({source_kind}): {parquet_path}"
         ) from exc
 
     if frame.empty:
