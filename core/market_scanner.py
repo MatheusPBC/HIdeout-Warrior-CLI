@@ -1,4 +1,5 @@
 import logging
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -66,6 +67,12 @@ class ScanStats:
     avg_score: float = 0.0
     scan_profile: str = "open_market"
     resolved_league: str = ""
+    macro_queries: int = 0
+    micro_queries: int = 0
+    deduped_ttl: int = 0
+    stage_a_candidates: int = 0
+    stage_b_passed: int = 0
+    budget_exhausted: int = 0
 
 
 @dataclass
@@ -163,6 +170,12 @@ class OnDemandScanner:
         self.api_client = MarketAPIClient(league=league)
         self.oracle = PricePredictor()
         self.currency_rates = self.api_client.sync_ninja_economy()
+        self._segment_cursor = 0
+        self._dedupe_ttl_seconds = 120.0
+        self._dedupe_ttl_cache: Dict[str, float] = {}
+        self._query_budget_per_cycle = 8
+        self._fetch_budget_per_cycle = 12
+        self._stage_a_candidate_cap = 120
         logger.info(
             "[%s] Scanner inicializado com %s taxas de moeda",
             self.api_client.league,
@@ -200,9 +213,158 @@ class OnDemandScanner:
 
         return query
 
+    def _cleanup_ttl_cache(self, now_ts: float) -> None:
+        if not self._dedupe_ttl_cache:
+            return
+        expired = [
+            item_id
+            for item_id, seen_at in self._dedupe_ttl_cache.items()
+            if (now_ts - seen_at) >= self._dedupe_ttl_seconds
+        ]
+        for item_id in expired:
+            self._dedupe_ttl_cache.pop(item_id, None)
+
+    def _is_deduped_by_ttl(self, item_id: str, now_ts: float) -> bool:
+        if not item_id:
+            return False
+        seen_at = self._dedupe_ttl_cache.get(item_id)
+        if seen_at is not None and (now_ts - seen_at) < self._dedupe_ttl_seconds:
+            return True
+        self._dedupe_ttl_cache[item_id] = now_ts
+        return False
+
+    def _build_segmented_macro_queries(
+        self,
+        item_class: str,
+        ilvl_min: int,
+        rarity: str,
+        min_listed_price: float,
+    ) -> List[dict]:
+        price_buckets: List[Tuple[float, Optional[float]]] = [
+            (1.0, 10.0),
+            (10.0, 40.0),
+            (40.0, 120.0),
+            (120.0, 300.0),
+            (300.0, None),
+        ]
+
+        ilvl_buckets: List[Tuple[int, Optional[int]]] = []
+        if ilvl_min <= 74:
+            ilvl_buckets.append((ilvl_min, 74))
+        ilvl_buckets.append((max(ilvl_min, 75), 83))
+        ilvl_buckets.append((max(ilvl_min, 84), None))
+
+        segments: List[dict] = []
+        for ilvl_low, ilvl_high in ilvl_buckets:
+            if ilvl_high is not None and ilvl_low > ilvl_high:
+                continue
+            for min_price, max_price in price_buckets:
+                effective_min_price = max(min_price, min_listed_price, 1.0)
+                if max_price is not None and effective_min_price >= max_price:
+                    continue
+                for influenced in (False, True):
+                    query = self.build_trade_query(
+                        item_class=item_class,
+                        ilvl_min=ilvl_low,
+                        rarity=rarity,
+                        is_influenced=influenced,
+                        min_listed_price=effective_min_price,
+                    )
+                    price_filters = query["query"]["filters"]["trade_filters"][
+                        "filters"
+                    ].setdefault("price", {})
+                    price_filters["min"] = effective_min_price
+                    if max_price is not None:
+                        price_filters["max"] = max_price
+                    ilvl_filters = query["query"]["filters"]["misc_filters"][
+                        "filters"
+                    ].setdefault("ilvl", {})
+                    ilvl_filters["min"] = ilvl_low
+                    if ilvl_high is not None:
+                        ilvl_filters["max"] = ilvl_high
+                    segments.append(query)
+        return segments
+
+    def _build_micro_queries(
+        self,
+        ilvl_min: int,
+        rarity: str,
+        min_listed_price: float,
+    ) -> List[dict]:
+        micro_price_cap = max(40.0, min(220.0, max(min_listed_price * 3.0, 80.0)))
+        micro_bases = [
+            "Imbued Wand",
+            "Opal Ring",
+            "Sadist Garb",
+            "Hubris Circlet",
+            "Two-Toned Boots",
+            "Stygian Vise",
+        ]
+        queries: List[dict] = []
+        for base in micro_bases:
+            query = self.build_trade_query(
+                item_class=base,
+                ilvl_min=max(ilvl_min, 84),
+                rarity=rarity,
+                is_influenced=False,
+                min_listed_price=max(min_listed_price, 1.0),
+            )
+            query["query"]["filters"]["trade_filters"]["filters"]["price"]["max"] = (
+                micro_price_cap
+            )
+            queries.append(query)
+        return queries
+
+    def _rotate_macro_segments(self, segments: List[dict], budget: int) -> List[dict]:
+        if not segments or budget <= 0:
+            return []
+        rotated = [
+            segments[(self._segment_cursor + idx) % len(segments)]
+            for idx in range(min(budget, len(segments)))
+        ]
+        self._segment_cursor = (self._segment_cursor + budget) % len(segments)
+        return rotated
+
+    def _safe_search_items(self, query: dict) -> Tuple[str, List[str]]:
+        try:
+            return self.api_client.search_items(query)
+        except Exception as exc:
+            logger.warning("Falha em search_items; continuando ciclo: %s", exc)
+            return "", []
+
+    def _safe_fetch_item_details(
+        self, item_ids: List[str], query_id: str
+    ) -> List[dict]:
+        try:
+            return self.api_client.fetch_item_details(item_ids, query_id)
+        except Exception as exc:
+            logger.warning("Falha em fetch_item_details; continuando ciclo: %s", exc)
+            return []
+
+    def _passes_stage_b_consensus(self, opportunity: ScanOpportunity) -> bool:
+        ml_signal = (
+            opportunity.profit > 0 and opportunity.ml_value > opportunity.listed_price
+        )
+
+        comparable_signal = False
+        if opportunity.comparables_count <= 1:
+            comparable_signal = (
+                opportunity.relative_discount >= 0.25 or opportunity.profit >= 20.0
+            )
+        elif opportunity.pricing_position == "below_floor":
+            comparable_signal = True
+        elif opportunity.market_median > 0:
+            comparable_signal = opportunity.listed_price <= (
+                opportunity.market_median * 0.94
+            )
+        elif opportunity.market_floor > 0:
+            comparable_signal = opportunity.listed_price <= opportunity.market_floor
+
+        return ml_signal and comparable_signal
+
     def extract_price_chaos(self, listing_json: dict) -> Optional[float]:
         price_info = listing_json.get("price", {})
-        currency = price_info.get("currency", "")
+        currency = str(price_info.get("currency", ""))
 
         try:
             amount = float(price_info.get("amount", 0.0))
@@ -222,7 +384,7 @@ class OnDemandScanner:
             "alch": "Orb of Alchemy",
         }
 
-        ninja_key = ninja_key_map.get(currency, currency.title() + " Orb")
+        ninja_key = ninja_key_map.get(currency) or (currency.title() + " Orb")
         rate = self.currency_rates.get(ninja_key)
         if rate is None:
             logger.warning(
@@ -392,7 +554,9 @@ class OnDemandScanner:
         query_id: str,
     ) -> ListingSnapshot:
         league_encoded = quote(self.api_client.league, safe="")
-        search_link = f"https://www.pathofexile.com/trade/search/{league_encoded}/{query_id}"
+        search_link = (
+            f"https://www.pathofexile.com/trade/search/{league_encoded}/{query_id}"
+        )
         trade_link = (
             f"{search_link}#{normalized_item.item_id}"
             if normalized_item.item_id
@@ -448,10 +612,12 @@ class OnDemandScanner:
 
         valuation = self.oracle.predict(normalized_item)
         risk_flags = self._risk_flags(normalized_item, valuation, stale_hours)
-        base_score, trusted_profit, profit, relative_discount = self._compute_base_score(
-            normalized_item,
-            valuation,
-            risk_flags,
+        base_score, trusted_profit, profit, relative_discount = (
+            self._compute_base_score(
+                normalized_item,
+                valuation,
+                risk_flags,
+            )
         )
         snapshot = self._build_listing_snapshot(normalized_item, query_id)
 
@@ -510,7 +676,9 @@ class OnDemandScanner:
                 for price in all_prices
                 if price != normalized_item.listed_price or len(all_prices) == 1
             ]
-            comparables = build_comparable_market_stats(normalized_item, comparable_prices)
+            comparables = build_comparable_market_stats(
+                normalized_item, comparable_prices
+            )
             opportunity.market_floor = comparables.market_floor
             opportunity.market_median = comparables.market_median
             opportunity.market_spread = comparables.market_spread
@@ -539,20 +707,100 @@ class OnDemandScanner:
     ) -> Tuple[List[ScanOpportunity], ScanStats]:
         scan_profile = self._scan_profile(item_class)
         if max_items <= 0:
-            return [], ScanStats(resolved_league=self.api_client.league, scan_profile=scan_profile)
+            return [], ScanStats(
+                resolved_league=self.api_client.league, scan_profile=scan_profile
+            )
 
-        query = self.build_trade_query(
-            item_class,
-            ilvl_min,
-            rarity,
-            False,
-            min_listed_price=max(min_listed_price, 1.0),
+        now_ts = time.time()
+        self._cleanup_ttl_cache(now_ts)
+
+        query_budget = max(2, min(self._query_budget_per_cycle, (max_items // 4) + 4))
+        fetch_budget = max(2, min(self._fetch_budget_per_cycle, (max_items // 3) + 4))
+
+        macro_segments = self._build_segmented_macro_queries(
+            item_class=item_class,
+            ilvl_min=ilvl_min,
+            rarity=rarity,
+            min_listed_price=min_listed_price,
         )
-        query_id, result_ids = self.api_client.search_items(query)
-        if not query_id or not result_ids:
-            return [], ScanStats(resolved_league=self.api_client.league, scan_profile=scan_profile)
+        macro_budget = max(1, int(query_budget * 0.7))
+        rotated_macro = self._rotate_macro_segments(macro_segments, macro_budget)
 
-        target_ids = result_ids[: min(max_items, len(result_ids))]
+        micro_queries = self._build_micro_queries(
+            ilvl_min=ilvl_min,
+            rarity=rarity,
+            min_listed_price=min_listed_price,
+        )
+        if item_class.strip():
+            targeted_query = self.build_trade_query(
+                item_class=item_class,
+                ilvl_min=ilvl_min,
+                rarity=rarity,
+                is_influenced=False,
+                min_listed_price=max(min_listed_price, 1.0),
+            )
+            micro_queries.insert(0, targeted_query)
+
+        micro_budget = max(1, query_budget - len(rotated_macro))
+        selected_micro = micro_queries[:micro_budget]
+
+        candidate_query_map: Dict[str, str] = {}
+        query_to_candidates: Dict[str, List[str]] = {}
+        total_found = 0
+        macro_queries_executed = 0
+        micro_queries_executed = 0
+
+        stage_a_candidate_cap = min(self._stage_a_candidate_cap, max(max_items * 6, 40))
+
+        for query in rotated_macro:
+            query_id, result_ids = self._safe_search_items(query)
+            macro_queries_executed += 1
+            if not query_id or not result_ids:
+                continue
+            total_found += len(result_ids)
+            for result_id in result_ids:
+                if result_id in candidate_query_map:
+                    continue
+                candidate_query_map[result_id] = query_id
+                query_to_candidates.setdefault(query_id, []).append(result_id)
+                if len(candidate_query_map) >= stage_a_candidate_cap:
+                    break
+            if len(candidate_query_map) >= stage_a_candidate_cap:
+                break
+
+        if len(candidate_query_map) < stage_a_candidate_cap:
+            for query in selected_micro:
+                query_id, result_ids = self._safe_search_items(query)
+                micro_queries_executed += 1
+                if not query_id or not result_ids:
+                    continue
+                total_found += len(result_ids)
+                for result_id in result_ids:
+                    if result_id in candidate_query_map:
+                        continue
+                    candidate_query_map[result_id] = query_id
+                    query_to_candidates.setdefault(query_id, []).append(result_id)
+                    if len(candidate_query_map) >= stage_a_candidate_cap:
+                        break
+                if len(candidate_query_map) >= stage_a_candidate_cap:
+                    break
+
+        budget_exhausted = int(
+            len(rotated_macro) < len(macro_segments)
+            or len(selected_micro) < len(micro_queries)
+            or len(candidate_query_map) >= stage_a_candidate_cap
+        )
+
+        if not candidate_query_map:
+            return [], ScanStats(
+                resolved_league=self.api_client.league,
+                scan_profile=scan_profile,
+                macro_queries=macro_queries_executed,
+                micro_queries=micro_queries_executed,
+                stage_a_candidates=0,
+                budget_exhausted=budget_exhausted,
+            )
+
         raw_opportunities: List[tuple[ScanOpportunity, NormalizedMarketItem]] = []
         total_evaluated = 0
         filtered_anti_fix = 0
@@ -567,35 +815,56 @@ class OnDemandScanner:
         filtered_open_cheap_low_profit = 0
         filtered_open_cheap_stale = 0
 
-        for i in range(0, len(target_ids), 10):
-            details = self.api_client.fetch_item_details(target_ids[i : i + 10], query_id)
-            for item_json in details:
-                listing = item_json.get("listing", {})
-                if not listing.get("whisper"):
-                    continue
-                if self.extract_price_chaos(listing) is None:
-                    skipped_invalid_currency += 1
-                    continue
+        deduped_ttl = 0
+        fetch_calls = 0
+        for query_id, item_ids in query_to_candidates.items():
+            for i in range(0, len(item_ids), 10):
+                if fetch_calls >= fetch_budget:
+                    budget_exhausted = 1
+                    break
+                details = self._safe_fetch_item_details(item_ids[i : i + 10], query_id)
+                fetch_calls += 1
+                for item_json in details:
+                    listing = item_json.get("listing", {})
+                    if not listing.get("whisper"):
+                        continue
 
-                built = self._build_opportunity(item_json, query_id, stale_hours)
-                if built is None:
-                    continue
+                    item_data = item_json.get("item", {})
+                    item_id = str(item_data.get("id", ""))
+                    if self._is_deduped_by_ttl(item_id, now_ts):
+                        deduped_ttl += 1
+                        continue
 
-                opportunity, normalized_item = built
-                total_evaluated += 1
+                    if self.extract_price_chaos(listing) is None:
+                        skipped_invalid_currency += 1
+                        continue
 
-                if opportunity.listed_price < min_listed_price:
-                    filtered_min_listed_price += 1
-                    continue
-                if anti_fix and "price_fix_suspected" in opportunity.risk_flags:
-                    filtered_anti_fix += 1
-                    continue
+                    built = self._build_opportunity(item_json, query_id, stale_hours)
+                    if built is None:
+                        continue
 
-                raw_opportunities.append((opportunity, normalized_item))
+                    opportunity, normalized_item = built
+                    total_evaluated += 1
+
+                    if opportunity.listed_price < min_listed_price:
+                        filtered_min_listed_price += 1
+                        continue
+                    if anti_fix and "price_fix_suspected" in opportunity.risk_flags:
+                        filtered_anti_fix += 1
+                        continue
+
+                    raw_opportunities.append((opportunity, normalized_item))
+            if fetch_calls >= fetch_budget:
+                break
 
         opportunities = self._enrich_market_context(raw_opportunities)
+        stage_b_opportunities = [
+            opportunity
+            for opportunity in opportunities
+            if self._passes_stage_b_consensus(opportunity)
+        ]
         filtered_opportunities: List[ScanOpportunity] = []
-        for opportunity in opportunities:
+        for opportunity in stage_b_opportunities:
             if scan_profile == "open_market":
                 open_market_reason = self._open_market_filter_reason(opportunity)
                 if open_market_reason == "filtered_open_confidence":
@@ -638,9 +907,10 @@ class OnDemandScanner:
             key=lambda opp: (opp.score, opp.trusted_profit, opp.profit),
             reverse=True,
         )
+        filtered_opportunities = filtered_opportunities[:max_items]
 
         stats = ScanStats(
-            total_found=len(result_ids),
+            total_found=total_found,
             total_evaluated=total_evaluated,
             filtered_anti_fix=filtered_anti_fix,
             filtered_min_profit=filtered_min_profit,
@@ -653,15 +923,29 @@ class OnDemandScanner:
             filtered_open_cheap_low_confidence=filtered_open_cheap_low_confidence,
             filtered_open_cheap_low_profit=filtered_open_cheap_low_profit,
             filtered_open_cheap_stale=filtered_open_cheap_stale,
-            avg_profit=round(sum(o.profit for o in filtered_opportunities) / len(filtered_opportunities), 1)
+            avg_profit=round(
+                sum(o.profit for o in filtered_opportunities)
+                / len(filtered_opportunities),
+                1,
+            )
             if filtered_opportunities
             else 0.0,
             max_profit=max((o.profit for o in filtered_opportunities), default=0.0),
-            avg_score=round(sum(o.score for o in filtered_opportunities) / len(filtered_opportunities), 1)
+            avg_score=round(
+                sum(o.score for o in filtered_opportunities)
+                / len(filtered_opportunities),
+                1,
+            )
             if filtered_opportunities
             else 0.0,
             scan_profile=scan_profile,
             resolved_league=self.api_client.league,
+            macro_queries=macro_queries_executed,
+            micro_queries=micro_queries_executed,
+            deduped_ttl=deduped_ttl,
+            stage_a_candidates=len(candidate_query_map),
+            stage_b_passed=len(stage_b_opportunities),
+            budget_exhausted=budget_exhausted,
         )
         return filtered_opportunities, stats
 

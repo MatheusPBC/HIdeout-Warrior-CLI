@@ -28,6 +28,12 @@
 - Implementada persistência de metadados por execução em `data/model_metadata/`, incluindo hash do dataset, auditoria, estratégia de split, schema de features e hash SHA256 dos modelos `.xgb` sem alterar o path dos artefatos existentes.
 - Atualizados os testes em `tests/test_train_oracle.py` para cobrir falha/sucesso dos quality gates e estrutura básica do JSON de metadata.
 - Validação executada nesta fase: `pytest -q tests/test_train_oracle.py` com **8 passed** e `pytest -q` com **47 passed**.
+- Evoluído o scanner em `core/market_scanner.py` para pipeline híbrido em duas fases: Stage A (macro sweep segmentado + micro snipe) e Stage B (consenso pragmático entre sinal ML e comparáveis), mantendo assinatura pública de `OnDemandScanner`.
+- Implementada rotação determinística de segmentos macro com orçamento por ciclo (query/fetch budgets), limites explícitos para reduzir burst/429 e degradação segura em falhas HTTP sem interromper o ciclo.
+- Adicionados dedupe TTL em memória por `item_id` no ciclo de avaliação e integração de candidatos macro/micro em pool único com deduplicação.
+- Expandido `ScanStats` com métricas compatíveis e default-safe: `macro_queries`, `micro_queries`, `deduped_ttl`, `stage_a_candidates`, `stage_b_passed`, `budget_exhausted`.
+- Atualizados os testes em `tests/test_market_scanner.py` para cobrir orçamento por execução, rotação de segmentos, dedupe TTL, pipeline Stage A/Stage B e compatibilidade de saída pública.
+- Validação executada nesta fase: `pytest -q tests/test_market_scanner.py` com **13 passed** e `pytest -q` com **52 passed**.
 
 ## 2026-03-10
 
