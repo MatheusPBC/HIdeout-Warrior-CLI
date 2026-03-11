@@ -77,6 +77,18 @@ def test_fetch_training_data_from_sqlite_builds_features(tmp_path) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE trade_bucket_events (
+            raw_item_json TEXT,
+            price_chaos REAL,
+            price_currency TEXT,
+            price_amount REAL,
+            account_name TEXT,
+            indexed TEXT
+        )
+        """
+    )
     raw_item = {
         "id": "item-1",
         "baseType": "Imbued Wand",
@@ -98,6 +110,28 @@ def test_fetch_training_data_from_sqlite_builds_features(tmp_path) -> None:
             "2026-03-11T10:00:00Z",
         ),
     )
+    conn.execute(
+        "INSERT INTO trade_bucket_events VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            pd.Series(
+                {
+                    "id": "item-2",
+                    "baseType": "Opal Ring",
+                    "ilvl": 85,
+                    "explicitMods": ["+# to maximum Life"],
+                    "implicitMods": [],
+                    "influences": {},
+                    "corrupted": False,
+                    "fractured": False,
+                }
+            ).to_json(),
+            25.0,
+            "chaos",
+            25.0,
+            "seller-2",
+            "2026-03-11T10:03:00Z",
+        ),
+    )
     conn.commit()
     conn.close()
 
@@ -108,6 +142,7 @@ def test_fetch_training_data_from_sqlite_builds_features(tmp_path) -> None:
     assert not df.empty
     assert "price_chaos" in df.columns
     assert "item_family" in df.columns
+    assert len(df) >= 2
 
 
 def test_load_training_dataframe_keeps_api_default_flow(monkeypatch) -> None:

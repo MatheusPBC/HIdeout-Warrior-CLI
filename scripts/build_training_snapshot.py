@@ -1,3 +1,5 @@
+import os
+import sys
 import hashlib
 import json
 import sqlite3
@@ -9,6 +11,8 @@ from uuid import uuid4
 import pandas as pd
 import typer
 from rich import print
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.item_normalizer import normalize_trade_item
 from scripts.train_oracle import (
@@ -38,7 +42,9 @@ def _safe_json_load(raw_payload: Any) -> Optional[Dict[str, Any]]:
 def _stable_event_key(row: Dict[str, Any], normalized_raw_json: str) -> str:
     candidate = "|".join(
         [
+            str(row.get("source_table", "")),
             str(row.get("change_id", "")),
+            str(row.get("query_id", "")),
             str(row.get("item_id", "")),
             str(row.get("indexed", "")),
             str(row.get("price_chaos", "")),
@@ -103,8 +109,58 @@ def build_bronze_dataframe(
         "rows_deduped": 0,
     }
     records: List[Dict[str, Any]] = []
+
+    def _table_exists(conn_ref: sqlite3.Connection, table_name: str) -> bool:
+        row = conn_ref.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    def _load_rows_from_table(table_name: str) -> List[sqlite3.Row]:
+        if table_name == "stash_events":
+            return conn.execute(
+                """
+                SELECT
+                    change_id,
+                    '' AS query_id,
+                    item_id,
+                    league,
+                    account_name,
+                    indexed,
+                    price_amount,
+                    price_currency,
+                    price_chaos,
+                    raw_item_json,
+                    'stash_events' AS source_table
+                FROM stash_events
+                """
+            ).fetchall()
+        return conn.execute(
+            """
+            SELECT
+                '' AS change_id,
+                query_id,
+                item_id,
+                league,
+                account_name,
+                indexed,
+                price_amount,
+                price_currency,
+                price_chaos,
+                raw_item_json,
+                'trade_bucket_events' AS source_table
+            FROM trade_bucket_events
+            """
+        ).fetchall()
+
     try:
-        rows = conn.execute("SELECT * FROM stash_events").fetchall()
+        rows: List[sqlite3.Row] = []
+        if _table_exists(conn, "stash_events"):
+            rows.extend(_load_rows_from_table("stash_events"))
+        if _table_exists(conn, "trade_bucket_events"):
+            rows.extend(_load_rows_from_table("trade_bucket_events"))
+
         stats["rows_read"] = len(rows)
         for row in rows:
             row_map = dict(row)
@@ -123,6 +179,7 @@ def build_bronze_dataframe(
                 "item_id": str(row_map.get("item_id") or parsed_item.get("id") or ""),
                 "league": str(row_map.get("league") or "Unknown"),
                 "account_name": str(row_map.get("account_name") or ""),
+                "source_table": str(row_map.get("source_table") or "unknown"),
                 "indexed": str(
                     row_map.get("indexed") or parsed_item.get("indexed") or ""
                 ),

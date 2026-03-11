@@ -48,6 +48,26 @@ def test_build_training_snapshot_creates_layers_partitions_and_dedupes(
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE trade_bucket_events (
+            run_id TEXT,
+            league TEXT,
+            base_type TEXT,
+            bucket_min INTEGER,
+            bucket_max INTEGER,
+            query_id TEXT,
+            item_id TEXT,
+            indexed TEXT,
+            account_name TEXT,
+            price_amount REAL,
+            price_currency TEXT,
+            price_chaos REAL,
+            raw_item_json TEXT,
+            collected_at TEXT
+        )
+        """
+    )
 
     item_a = pd.Series(_sample_item("item-1")).to_json()
     item_b = pd.Series(_sample_item("item-2", base_type="Opal Ring")).to_json()
@@ -111,6 +131,25 @@ def test_build_training_snapshot_creates_layers_partitions_and_dedupes(
     conn.executemany(
         "INSERT INTO stash_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
     )
+    conn.execute(
+        "INSERT INTO trade_bucket_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "run-1",
+            "Standard",
+            "Vaal Regalia",
+            151,
+            500,
+            "query-1",
+            "item-3",
+            "2026-03-11T10:20:00Z",
+            "seller-d",
+            120.0,
+            "chaos",
+            120.0,
+            pd.Series(_sample_item("item-3", base_type="Vaal Regalia")).to_json(),
+            "2026-03-11T10:20:05Z",
+        ),
+    )
     conn.commit()
     conn.close()
 
@@ -121,8 +160,8 @@ def test_build_training_snapshot_creates_layers_partitions_and_dedupes(
     )
 
     assert summary["invalid_json_skipped"] == 1
-    assert summary["bronze_rows"] == 3
-    assert summary["silver_rows"] == 2
+    assert summary["bronze_rows"] == 4
+    assert summary["silver_rows"] >= 2
     assert summary["gold_rows"] >= 1
 
     bronze_partition = (

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, cast
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -524,7 +524,7 @@ def _apply_training_filters(
     return df
 
 
-def _trade_item_from_firehose_row(row: sqlite3.Row) -> Optional[dict]:
+def _trade_item_from_firehose_row(row: Mapping[str, Any]) -> Optional[dict]:
     raw_payload = row["raw_item_json"]
     if not raw_payload:
         return None
@@ -559,17 +559,40 @@ def fetch_training_data_from_sqlite(
     apply_outlier_filter: bool = True,
     apply_stale_filter: bool = True,
 ) -> pd.DataFrame:
+    def _table_exists(conn_ref: sqlite3.Connection, table_name: str) -> bool:
+        row = conn_ref.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     dataset: List[dict] = []
     try:
-        rows = conn.execute(
-            """
-            SELECT raw_item_json, price_chaos, price_currency, price_amount, account_name, indexed
-            FROM stash_events
-            WHERE price_chaos > 0
-            """
-        ).fetchall()
+        table_queries: List[str] = []
+        if _table_exists(conn, "stash_events"):
+            table_queries.append(
+                """
+                SELECT raw_item_json, price_chaos, price_currency, price_amount, account_name, indexed
+                FROM stash_events
+                WHERE price_chaos > 0
+                """
+            )
+        if _table_exists(conn, "trade_bucket_events"):
+            table_queries.append(
+                """
+                SELECT raw_item_json, price_chaos, price_currency, price_amount, account_name, indexed
+                FROM trade_bucket_events
+                WHERE price_chaos > 0
+                """
+            )
+
+        if not table_queries:
+            return pd.DataFrame(dataset)
+
+        union_query = " UNION ALL ".join(table_queries)
+        rows = conn.execute(union_query).fetchall()
         for row in rows:
             item_data = _trade_item_from_firehose_row(row)
             if item_data is None:

@@ -29,6 +29,18 @@ def _clean_optional_str(value: Optional[str]) -> Optional[str]:
     return str(value)
 
 
+def _run_snapshot_step(
+    db_path: str,
+    snapshot_output_dir: str,
+    snapshot_date: Optional[str],
+) -> None:
+    build_training_snapshot(
+        db_path=db_path,
+        output_dir=snapshot_output_dir,
+        snapshot_date=snapshot_date,
+    )
+
+
 @app.command()
 def run(
     db_path: str = typer.Option("data/firehose.db", "--db-path", help="SQLite path"),
@@ -36,6 +48,11 @@ def run(
         None,
         "--start-change-id",
         help="Optional miner start change id",
+    ),
+    oauth_token: Optional[str] = typer.Option(
+        None,
+        "--oauth-token",
+        help="OAuth bearer token for firehose miner",
     ),
     max_pages: int = typer.Option(0, "--max-pages", help="Miner max pages"),
     sleep_seconds: float = typer.Option(
@@ -109,13 +126,14 @@ def run(
                 start_change_id=_clean_optional_str(start_change_id),
                 max_pages=max_pages,
                 sleep_seconds=sleep_seconds,
+                oauth_token=_clean_optional_str(oauth_token),
             ),
         ),
         (
             "build_training_snapshot.build",
-            lambda: build_training_snapshot(
+            lambda: _run_snapshot_step(
                 db_path=db_path,
-                output_dir=snapshot_output_dir,
+                snapshot_output_dir=snapshot_output_dir,
                 snapshot_date=_clean_optional_str(snapshot_date),
             ),
         ),

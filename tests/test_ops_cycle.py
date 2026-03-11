@@ -25,9 +25,11 @@ def test_ops_cycle_help_executes_as_direct_script() -> None:
 def test_ops_cycle_runs_in_sequence_and_emits_metric(monkeypatch, tmp_path) -> None:
     calls = []
     captured_metric = {}
+    captured_miner_kwargs = {}
 
-    def _fake_miner(**_kwargs):
+    def _fake_miner(**kwargs):
         calls.append("miner")
+        captured_miner_kwargs.update(kwargs)
 
     def _fake_snapshot(**_kwargs):
         calls.append("snapshot")
@@ -48,6 +50,7 @@ def test_ops_cycle_runs_in_sequence_and_emits_metric(monkeypatch, tmp_path) -> N
         db_path=str(tmp_path / "firehose.db"),
         snapshot_output_dir=str(tmp_path / "snapshots"),
         train_source="parquet",
+        oauth_token="token-abc",
     )
 
     assert calls == ["miner", "snapshot", "train"]
@@ -57,6 +60,7 @@ def test_ops_cycle_runs_in_sequence_and_emits_metric(monkeypatch, tmp_path) -> N
     assert captured_metric["payload"]["effective_parquet_path"] == str(
         tmp_path / "snapshots" / "gold"
     )
+    assert captured_miner_kwargs["oauth_token"] == "token-abc"
     assert captured_metric["train_kwargs"]["parquet_path"] == str(
         tmp_path / "snapshots" / "gold"
     )

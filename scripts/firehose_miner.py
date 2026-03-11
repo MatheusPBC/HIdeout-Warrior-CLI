@@ -1,3 +1,5 @@
+import os
+import sys
 import json
 import sqlite3
 import time
@@ -8,9 +10,14 @@ import requests
 import typer
 from rich import print
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from core.ops_metrics import append_metric_event
 
-PUBLIC_STASH_URL = "https://www.pathofexile.com/api/public-stash-tabs"
+PUBLIC_STASH_URL = "https://api.pathofexile.com/public-stash-tabs"
+DEFAULT_USER_AGENT = (
+    "OAuth hideout-warrior-cli/1.0.0 (contact: hideout-warrior-cli@local)"
+)
 
 CURRENCY_ALIASES = {
     "chaos": "chaos",
@@ -200,8 +207,35 @@ def fetch_stash_page(
             response = session.get(
                 PUBLIC_STASH_URL, params=params, timeout=timeout_seconds
             )
+            if response.status_code == 401:
+                try:
+                    error_payload = response.json().get("error", {})
+                except (ValueError, AttributeError):
+                    error_payload = {}
+                message = str(
+                    error_payload.get(
+                        "message",
+                        "Unauthorized; token missing/invalid for public stash endpoint",
+                    )
+                )
+                raise PermissionError(message)
+            if response.status_code == 403:
+                try:
+                    error_payload = response.json().get("error", {})
+                except (ValueError, AttributeError):
+                    error_payload = {}
+                if int(error_payload.get("code", -1)) == 6:
+                    message = str(
+                        error_payload.get(
+                            "message",
+                            "Forbidden; OAuth token required for public stash endpoint",
+                        )
+                    )
+                    raise PermissionError(message)
             response.raise_for_status()
             return response.json()
+        except PermissionError:
+            raise
         except (requests.RequestException, ValueError) as exc:
             wait_seconds = min(2 * attempt, 10)
             print(
@@ -209,6 +243,21 @@ def fetch_stash_page(
             )
             time.sleep(wait_seconds)
     return None
+
+
+def _build_session(
+    oauth_token: Optional[str],
+    user_agent: str,
+) -> requests.Session:
+    session = requests.Session()
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json",
+    }
+    if oauth_token:
+        headers["Authorization"] = f"Bearer {oauth_token}"
+    session.headers.update(headers)
+    return session
 
 
 def ingest_stash_page(
@@ -302,6 +351,16 @@ def run(
     sleep_seconds: float = typer.Option(
         1.5, "--sleep-seconds", help="Delay between pages"
     ),
+    oauth_token: Optional[str] = typer.Option(
+        None,
+        "--oauth-token",
+        help="OAuth bearer token (fallback: env POE_OAUTH_TOKEN)",
+    ),
+    user_agent: str = typer.Option(
+        DEFAULT_USER_AGENT,
+        "--user-agent",
+        help="Identifiable User-Agent required by PoE API policy",
+    ),
 ) -> None:
     run_id = str(int(time.time() * 1000))
     db_file = Path(db_path)
@@ -316,7 +375,8 @@ def run(
     print(
         f"[cyan]firehose miner iniciado[/cyan] db={db_path} start={current_change_id}"
     )
-    session = requests.Session()
+    effective_oauth_token = oauth_token or os.getenv("POE_OAUTH_TOKEN")
+    session = _build_session(effective_oauth_token, user_agent=user_agent)
     total_inserted = 0
     total_duplicates = 0
     fetch_failures = 0
@@ -329,7 +389,19 @@ def run(
             if max_pages > 0 and pages_processed >= max_pages:
                 break
 
-            response_payload = fetch_stash_page(session, current_change_id)
+            try:
+                response_payload = fetch_stash_page(session, current_change_id)
+            except PermissionError as exc:
+                print(
+                    "[red]Acesso negado/sem autorização no endpoint public stash. "
+                    "Use OAuth token válido com escopo service:psapi.[/red]"
+                )
+                print(
+                    "[yellow]Verifique: 1) token Bearer válido em --oauth-token/POE_OAUTH_TOKEN; "
+                    "2) escopo service:psapi; 3) uso do host api.pathofexile.com. "
+                    "Docs: https://www.pathofexile.com/developer/docs/authorization[/yellow]"
+                )
+                raise typer.Exit(code=2) from exc
             if response_payload is None:
                 fetch_failures += 1
                 print("[red]falha ao obter página; continuando loop[/red]")

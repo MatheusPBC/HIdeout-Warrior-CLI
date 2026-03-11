@@ -48,6 +48,15 @@
 - Criado `scripts/ops_report.py` com comando `build` para consolidar métricas JSONL por componente (runs, ok/error, error_rate, avg/p50/p95, last_ts_utc), mesclar estado ativo do registry por família e gerar relatório em `data/ops_reports/`.
 - Adicionados novos testes em `tests/test_ops_cycle.py` e `tests/test_ops_report.py`, além de expansão em `tests/test_model_registry.py` e `tests/test_train_oracle.py` para cobrir policy thresholds e repasse de opções no treino.
 - Validação executada nesta fase: `pytest -q tests/test_model_registry.py tests/test_train_oracle.py tests/test_ops_cycle.py tests/test_ops_report.py` com **17 passed** e `pytest -q` com **66 passed**.
+- Criado `scripts/trade_bucket_collector.py` com CLI Typer de comando único para coleta Trade API desacoplada do treino, cobrindo bases-alvo e buckets de preço padrão com ordenação `indexed desc`, lotes de fetch de 10 IDs e quotas configuráveis por execução.
+- Implementada persistência em `trade_bucket_events` no SQLite (`data/firehose.db`) com schema dedicado, deduplicação em memória e no banco por `UNIQUE(league, item_id, indexed, price_chaos)`, além de degradação segura por bucket para não interromper a execução completa.
+- Integrado `scripts/build_training_snapshot.py` para ler e unificar `stash_events` + `trade_bucket_events` em contrato comum (incluindo `source_table` no bronze), preservando pipeline e dedup nas camadas bronze/silver/gold.
+- Evoluído `scripts/train_oracle.py` para carregar treino offline via SQLite a partir da união de `stash_events` e `trade_bucket_events`, mantendo compatibilidade com `--source api|sqlite|parquet` e defaults existentes.
+- Adicionados testes em `tests/test_trade_bucket_collector.py` e atualizações em `tests/test_training_snapshot_job.py` e `tests/test_train_oracle.py` cobrindo schema/dedupe, query por bucket + sort, cotas de coleta, snapshot com tabela nova e loader sqlite unificado.
+- Corrigido `scripts/firehose_miner.py` para uso de host `api.pathofexile.com`, com tratamento explícito de `401/403`, suporte a `--oauth-token`/`POE_OAUTH_TOKEN`, `User-Agent` identificável e mensagem orientando sobre escopo `service:psapi`.
+- Ajustados bootstrap/execução direta dos scripts operacionais, incluindo repasse explícito do token no `scripts/ops_cycle.py`.
+- Atualizados os testes em `tests/test_firehose_miner.py` e `tests/test_ops_cycle.py` para cobrir autorização OAuth e propagação de parâmetros.
+- Validação executada nesta fase: `pytest -q tests/test_trade_bucket_collector.py tests/test_training_snapshot_job.py tests/test_train_oracle.py` com **13 passed** e `pytest -q` com **72 passed**.
 
 ## 2026-03-10
 

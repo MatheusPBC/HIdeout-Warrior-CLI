@@ -1,6 +1,11 @@
 import sqlite3
+from typing import Any, cast
+
+import pytest
+import typer
 
 from scripts.firehose_miner import (
+    fetch_stash_page,
     run,
     ingest_stash_page,
     initialize_database,
@@ -151,3 +156,72 @@ def test_run_emits_operational_metric(tmp_path, monkeypatch) -> None:
     assert captured["status"] == "ok"
     assert captured["payload"]["pages_processed"] == 1
     assert "throughput_items_per_sec" in captured["payload"]
+
+
+def test_fetch_stash_page_raises_permission_error_on_oauth_forbidden() -> None:
+    class _Resp:
+        status_code = 403
+
+        @staticmethod
+        def json():
+            return {
+                "error": {
+                    "code": 6,
+                    "message": "Forbidden; You must use an OAuth client to access this endpoint",
+                }
+            }
+
+        @staticmethod
+        def raise_for_status():
+            raise AssertionError("raise_for_status should not be called")
+
+    class _Session:
+        @staticmethod
+        def get(*_args, **_kwargs):
+            return _Resp()
+
+    with pytest.raises(PermissionError):
+        fetch_stash_page(cast(Any, _Session()), next_change_id=None, max_retries=1)
+
+
+def test_fetch_stash_page_raises_permission_error_on_unauthorized() -> None:
+    class _Resp:
+        status_code = 401
+
+        @staticmethod
+        def json():
+            return {
+                "error": {
+                    "code": 8,
+                    "message": "Unauthorized",
+                }
+            }
+
+        @staticmethod
+        def raise_for_status():
+            raise AssertionError("raise_for_status should not be called")
+
+    class _Session:
+        @staticmethod
+        def get(*_args, **_kwargs):
+            return _Resp()
+
+    with pytest.raises(PermissionError):
+        fetch_stash_page(cast(Any, _Session()), next_change_id=None, max_retries=1)
+
+
+def test_run_exits_cleanly_on_oauth_permission_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "scripts.firehose_miner.fetch_stash_page",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PermissionError("oauth required")
+        ),
+    )
+
+    with pytest.raises(typer.Exit):
+        run(
+            db_path=str(tmp_path / "firehose.db"),
+            start_change_id="boot",
+            max_pages=1,
+            sleep_seconds=0.0,
+        )
