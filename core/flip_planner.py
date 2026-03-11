@@ -342,3 +342,5 @@ class FlipAdvisor:
         if not steps:
             return 0.5
         return sum(step.probability for step in steps) / len(steps)
+
+
