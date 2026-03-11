@@ -199,3 +199,60 @@ def test_normalize_trade_item_marks_fractured_low_ilvl_brick():
     assert normalized is not None
     assert normalized.low_ilvl_context is True
     assert normalized.fractured_low_ilvl_brick is True
+
+
+def test_normalize_trade_item_extracts_native_tiers_from_nested_hashes_and_strings():
+    raw = {
+        "listing": {
+            "whisper": "@seller hi",
+            "indexed": "2026-03-11T10:00:00Z",
+            "account": {"name": "seller"},
+            "price": {"amount": 35.0, "currency": "chaos"},
+        },
+        "item": {
+            "id": "wand-nested-native-tier",
+            "baseType": "Imbued Wand",
+            "ilvl": 84,
+            "explicitMods": [
+                "40% increased Spell Damage",
+                "15% increased Cast Speed",
+            ],
+            "implicitMods": [],
+            "extended": {
+                "mods": {
+                    "explicit": [
+                        {
+                            "name": "Spell Damage",
+                            "tier": "Tier 1",
+                        },
+                        {
+                            "name": "Cast Speed",
+                            "tier": "P3",
+                        },
+                    ]
+                },
+                "hashes": {
+                    "explicit": [
+                        {
+                            "hash": "spell_damage_hash",
+                            "explicit": "Spell Damage",
+                            "tier": "S2",
+                        }
+                    ]
+                },
+            },
+        },
+    }
+
+    normalized = normalize_trade_item(
+        raw,
+        listed_price=35.0,
+        listing_currency="chaos",
+        listing_amount=35.0,
+    )
+
+    assert normalized is not None
+    assert normalized.tier_source == "native"
+    assert normalized.native_tier_count >= 3
+    assert "SpellDamage_T1" in normalized.mod_tokens
+    assert "CastSpeed_T3" in normalized.mod_tokens

@@ -170,7 +170,7 @@ class TestScanProfiles:
         )
         scanner_with_mock_rates.oracle.predict = MagicMock(
             return_value=ValuationResult(
-                35.0, 0.75, "wand_caster", "family_fallback", 0.5
+                3.5, 0.75, "wand_caster", "family_fallback", 0.5
             )
         )
 
@@ -296,6 +296,35 @@ class TestScanProfiles:
         assert stats.filtered_stage_a_fractured_low_ilvl_brick >= 1
         scanner_with_mock_rates.oracle.predict.assert_not_called()
 
+    def test_stage_a_discards_low_ilvl_without_twink_override_before_oracle(
+        self, scanner_with_mock_rates
+    ):
+        detail = _make_item_detail(
+            item_id="low-ilvl-no-twink-stage-a",
+            base_type="Driftwood Wand",
+            ilvl=70,
+            price_amount=8.0,
+            explicit_mods=["40% increased Spell Damage"],
+        )
+        scanner_with_mock_rates.api_client.search_items = MagicMock(
+            return_value=("q1", ["low-ilvl-no-twink-stage-a"])
+        )
+        scanner_with_mock_rates.api_client.fetch_item_details = MagicMock(
+            return_value=[detail]
+        )
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            return_value=ValuationResult(90.0, 0.8, "wand_caster", "xgb_family", 0.8)
+        )
+
+        opportunities, stats = scanner_with_mock_rates.scan_opportunities(
+            item_class="Driftwood Wand", max_items=2, anti_fix=False
+        )
+
+        assert opportunities == []
+        assert stats.total_evaluated == 0
+        assert stats.filtered_stage_a_low_ilvl_no_twink >= 1
+        scanner_with_mock_rates.oracle.predict.assert_not_called()
+
     def test_low_ilvl_without_twink_fails_high_ticket_fallback_with_few_comparables(
         self, scanner_with_mock_rates
     ):
@@ -356,7 +385,69 @@ class TestScanProfiles:
 
         assert len(opportunities) == 1
         assert stats.stage_b_passed == 1
+        assert stats.filtered_stage_a_low_ilvl_no_twink == 0
+        assert stats.total_evaluated == 1
         assert opportunities[0].twink_override is True
+
+    def test_stage_b_blocks_low_evidence_ml_market_divergence_2x(
+        self, scanner_with_mock_rates
+    ):
+        item = _make_item_detail(
+            item_id="divergence-2x",
+            base_type="Imbued Wand",
+            ilvl=84,
+            price_amount=10.0,
+            explicit_mods=["40% increased Spell Damage"],
+        )
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            return_value=ValuationResult(45.0, 0.9, "wand_caster", "xgb_family", 0.8)
+        )
+
+        built = scanner_with_mock_rates._build_opportunity(
+            item, query_id="q1", stale_hours=48.0
+        )
+        assert built is not None
+        opportunity, _ = built
+        opportunity.market_median = 20.0
+        opportunity.comparables_count = 1
+        opportunity.pricing_position = "near_market"
+
+        consensus, reason = scanner_with_mock_rates._stage_b_consensus_decision(
+            opportunity
+        )
+
+        assert consensus is False
+        assert reason == "low_evidence_ml_market_divergence_2x"
+
+    def test_stage_b_blocks_low_evidence_ml_market_divergence_3x(
+        self, scanner_with_mock_rates
+    ):
+        item = _make_item_detail(
+            item_id="divergence-3x",
+            base_type="Imbued Wand",
+            ilvl=84,
+            price_amount=10.0,
+            explicit_mods=["40% increased Spell Damage"],
+        )
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            return_value=ValuationResult(70.0, 0.9, "wand_caster", "xgb_family", 0.8)
+        )
+
+        built = scanner_with_mock_rates._build_opportunity(
+            item, query_id="q1", stale_hours=48.0
+        )
+        assert built is not None
+        opportunity, _ = built
+        opportunity.market_median = 20.0
+        opportunity.comparables_count = 2
+        opportunity.pricing_position = "near_market"
+
+        consensus, reason = scanner_with_mock_rates._stage_b_consensus_decision(
+            opportunity
+        )
+
+        assert consensus is False
+        assert reason == "low_evidence_ml_market_divergence_3x"
 
     def test_family_fallback_low_evidence_applies_cap_and_explains(
         self, scanner_with_mock_rates

@@ -2,6 +2,13 @@
 
 ## 2026-03-11
 
+- Endurecido o consenso híbrido em `core/market_scanner.py` para baixa evidência de mercado: quando `comparables_count < 3` e `ml_value` diverge da mediana (`>2x`/`>3x`), a oportunidade é bloqueada com motivos explícitos (`low_evidence_ml_market_divergence_2x`/`3x`) refletidos na `valuation_explanation`.
+- Aplicado corte a frio no Stage A para `ilvl < 75` sem `twink_override`, evitando valuation pesado em itens de baixo contexto e adicionando o contador `filtered_stage_a_low_ilvl_no_twink` nas métricas operacionais do scanner.
+- Adicionada penalização forte de score para divergência ML vs mercado com pouca evidência no enriquecimento de contexto, reduzindo promoção de outliers mesmo antes do gate final de consenso.
+- Reforçado o parser de tier nativo em `core/item_normalizer.py` com suporte a tiers numéricos e string (`P3`, `S2`, `Tier 1`, etc.), novas chaves comuns (`tierNumber`, `officialTier`, `rank`) e navegação mais ampla em estruturas aninhadas de `extended/mods/hashes`.
+- Atualizados testes em `tests/test_market_scanner.py` e `tests/test_item_normalizer.py` cobrindo bloqueios de divergência `2x/3x`, descarte Stage A por `ilvl`, bypass por `twink_override` e extração de tiers nativos em payloads aninhados.
+- Validação executada nesta etapa: `pytest -q` com **90 passed**.
+
 - Endurecido o pipeline de normalização em `core/item_normalizer.py` com `tier-first` seguro: extração de tier nativo, validação de plausibilidade por `ilvl`/família, marcação `tier_ilvl_mismatch` e tokenização `*_approx` quando o tier não é confiável para o contexto.
 - Adicionadas flags estruturadas de contexto no item normalizado (`low_ilvl_context`, `twink_override`, `fractured_low_ilvl_brick`, `tier_source`, `native_tier_count`) para governança explícita de risco no scanner e no valuation.
 - Reforçado o Stage A/Stage B em `core/market_scanner.py` com descarte precoce de `fractured_low_ilvl_brick`, contador dedicado em `ScanStats`, gate de `high-ticket` por `ilvl` mínimo e endurecimento de consenso para `family_fallback` com baixa evidência de mercado (`comparables_count < 3`).

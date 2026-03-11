@@ -103,6 +103,9 @@ _TWINK_OVERRIDE_RE = re.compile(
     r"\+(\d+)\s+to\s+level\s+of\s+all\s+.+?skill\s+gems",
     re.IGNORECASE,
 )
+_TIER_RANK_RE = re.compile(
+    r"(?:^|\b)(?:tier\s*)?([pst])?\s*(\d+)(?:\b|$)", re.IGNORECASE
+)
 
 
 def _extract_numbers(mod: str) -> List[float]:
@@ -202,6 +205,39 @@ def _has_twink_override(mods: Iterable[str]) -> bool:
     return False
 
 
+def _coerce_tier_rank(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        rank = int(value)
+        return rank if rank > 0 else None
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    if text.isdigit():
+        rank = int(text)
+        return rank if rank > 0 else None
+
+    match = _TIER_RANK_RE.search(text)
+    if not match:
+        return None
+
+    prefix = (match.group(1) or "").lower()
+    numeric_rank = int(match.group(2))
+    if numeric_rank <= 0:
+        return None
+
+    if prefix == "p":
+        return numeric_rank
+    if prefix in {"s", "t", ""}:
+        return numeric_rank
+    return None
+
+
 def _native_tier_from_container(
     container: Any,
     detected_tiers: Dict[str, int],
@@ -209,39 +245,69 @@ def _native_tier_from_container(
     native_count = 0
 
     if isinstance(container, dict):
-        tier_value = container.get("tier")
-        if isinstance(tier_value, (int, float)) and tier_value > 0:
+        tier_rank: Optional[int] = None
+        for tier_key in (
+            "tier",
+            "tierNumber",
+            "tier_number",
+            "tierRank",
+            "tier_rank",
+            "officialTier",
+            "official_tier",
+            "rank",
+            "value",
+        ):
+            if tier_key not in container:
+                continue
+            maybe_rank = _coerce_tier_rank(container.get(tier_key))
+            if maybe_rank is not None:
+                tier_rank = maybe_rank
+                break
+
+        if tier_rank is not None:
             native_count += 1
             text = " ".join(
                 str(container.get(key, ""))
-                for key in ("name", "id", "mod", "text", "type")
+                for key in (
+                    "name",
+                    "id",
+                    "mod",
+                    "text",
+                    "type",
+                    "key",
+                    "hash",
+                    "explicit",
+                )
             ).lower()
             if "spell" in text and "damage" in text:
                 detected_tiers["SpellDamage"] = min(
-                    detected_tiers.get("SpellDamage", int(tier_value)),
-                    int(tier_value),
+                    detected_tiers.get("SpellDamage", tier_rank),
+                    tier_rank,
                 )
             if "cast speed" in text or "casting speed" in text:
                 detected_tiers["CastSpeed"] = min(
-                    detected_tiers.get("CastSpeed", int(tier_value)), int(tier_value)
+                    detected_tiers.get("CastSpeed", tier_rank),
+                    tier_rank,
                 )
             if "critical" in text and "spell" in text:
                 detected_tiers["CritChanceSpells"] = min(
-                    detected_tiers.get("CritChanceSpells", int(tier_value)),
-                    int(tier_value),
+                    detected_tiers.get("CritChanceSpells", tier_rank),
+                    tier_rank,
                 )
             if "life" in text:
                 detected_tiers["Life"] = min(
-                    detected_tiers.get("Life", int(tier_value)), int(tier_value)
+                    detected_tiers.get("Life", tier_rank),
+                    tier_rank,
                 )
             if "resist" in text:
                 detected_tiers["Resist"] = min(
-                    detected_tiers.get("Resist", int(tier_value)), int(tier_value)
+                    detected_tiers.get("Resist", tier_rank),
+                    tier_rank,
                 )
             if "suppress" in text:
                 detected_tiers["SpellSuppress"] = min(
-                    detected_tiers.get("SpellSuppress", int(tier_value)),
-                    int(tier_value),
+                    detected_tiers.get("SpellSuppress", tier_rank),
+                    tier_rank,
                 )
 
         for value in container.values():
@@ -257,7 +323,12 @@ def _extract_native_tier_metadata(
     item_data: Dict[str, Any],
 ) -> tuple[Dict[str, int], int]:
     detected_tiers: Dict[str, int] = {}
-    root_containers = [item_data.get("extended"), item_data.get("mods")]
+    root_containers = [
+        item_data.get("extended"),
+        item_data.get("mods"),
+        item_data.get("hashes"),
+        item_data.get("explicit"),
+    ]
     native_count = 0
     for container in root_containers:
         if container is not None:

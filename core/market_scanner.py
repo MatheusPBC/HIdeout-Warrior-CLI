@@ -70,6 +70,7 @@ class ScanStats:
     filtered_open_cheap_low_confidence: int = 0
     filtered_open_cheap_low_profit: int = 0
     filtered_open_cheap_stale: int = 0
+    filtered_stage_a_low_ilvl_no_twink: int = 0
     filtered_stage_a_fractured_low_ilvl_brick: int = 0
     avg_profit: float = 0.0
     max_profit: float = 0.0
@@ -397,6 +398,7 @@ class OnDemandScanner:
                     "total_found": stats.total_found,
                     "total_evaluated": stats.total_evaluated,
                     "stage_a_candidates": stats.stage_a_candidates,
+                    "filtered_stage_a_low_ilvl_no_twink": stats.filtered_stage_a_low_ilvl_no_twink,
                     "filtered_stage_a_fractured_low_ilvl_brick": stats.filtered_stage_a_fractured_low_ilvl_brick,
                     "stage_b_passed": stats.stage_b_passed,
                     "macro_queries": stats.macro_queries,
@@ -432,6 +434,13 @@ class OnDemandScanner:
     def _stage_b_consensus_decision(
         self, opportunity: ScanOpportunity
     ) -> Tuple[bool, str]:
+        if opportunity.comparables_count < 3 and opportunity.market_median > 0:
+            ml_market_ratio = opportunity.ml_value / max(opportunity.market_median, 1.0)
+            if ml_market_ratio > 3.0:
+                return (False, "low_evidence_ml_market_divergence_3x")
+            if ml_market_ratio > 2.0:
+                return (False, "low_evidence_ml_market_divergence_2x")
+
         if (
             opportunity.low_ilvl_context
             and not opportunity.twink_override
@@ -844,6 +853,24 @@ class OnDemandScanner:
         opportunity.valuation_result["ml_value_after_cap"] = opportunity.ml_value
         opportunity.valuation_result["ml_value_cap_applied"] = True
 
+    def _apply_low_evidence_ml_market_penalty(
+        self, opportunity: ScanOpportunity
+    ) -> None:
+        if opportunity.comparables_count >= 3 or opportunity.market_median <= 0:
+            return
+
+        ml_market_ratio = opportunity.ml_value / max(opportunity.market_median, 1.0)
+        if ml_market_ratio > 3.0:
+            if "low_evidence_ml_market_divergence_3x" not in opportunity.risk_flags:
+                opportunity.risk_flags.append("low_evidence_ml_market_divergence_3x")
+            opportunity.score = round(max(opportunity.score - 80.0, 0.0), 1)
+            return
+
+        if ml_market_ratio > 2.0:
+            if "low_evidence_ml_market_divergence_2x" not in opportunity.risk_flags:
+                opportunity.risk_flags.append("low_evidence_ml_market_divergence_2x")
+            opportunity.score = round(max(opportunity.score - 55.0, 0.0), 1)
+
     def _build_opportunity(
         self,
         item_json: dict,
@@ -983,6 +1010,7 @@ class OnDemandScanner:
                 ),
                 comparables,
             )
+            self._apply_low_evidence_ml_market_penalty(opportunity)
             opportunity.valuation_explanation = self._build_valuation_explanation(
                 opportunity
             )
@@ -1136,6 +1164,7 @@ class OnDemandScanner:
         filtered_open_cheap_low_confidence = 0
         filtered_open_cheap_low_profit = 0
         filtered_open_cheap_stale = 0
+        filtered_stage_a_low_ilvl_no_twink = 0
         filtered_stage_a_fractured_low_ilvl_brick = 0
 
         deduped_ttl = 0
@@ -1171,6 +1200,10 @@ class OnDemandScanner:
                         listing_amount=float(price_info.get("amount", 0.0) or 0.0),
                     )
                     if normalized_item is None:
+                        continue
+
+                    if normalized_item.ilvl < 75 and not normalized_item.twink_override:
+                        filtered_stage_a_low_ilvl_no_twink += 1
                         continue
 
                     if normalized_item.fractured_low_ilvl_brick:
@@ -1266,6 +1299,7 @@ class OnDemandScanner:
             filtered_open_cheap_low_confidence=filtered_open_cheap_low_confidence,
             filtered_open_cheap_low_profit=filtered_open_cheap_low_profit,
             filtered_open_cheap_stale=filtered_open_cheap_stale,
+            filtered_stage_a_low_ilvl_no_twink=filtered_stage_a_low_ilvl_no_twink,
             filtered_stage_a_fractured_low_ilvl_brick=filtered_stage_a_fractured_low_ilvl_brick,
             avg_profit=round(
                 sum(o.profit for o in filtered_opportunities)
