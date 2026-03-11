@@ -34,6 +34,14 @@
 - Expandido `ScanStats` com métricas compatíveis e default-safe: `macro_queries`, `micro_queries`, `deduped_ttl`, `stage_a_candidates`, `stage_b_passed`, `budget_exhausted`.
 - Atualizados os testes em `tests/test_market_scanner.py` para cobrir orçamento por execução, rotação de segmentos, dedupe TTL, pipeline Stage A/Stage B e compatibilidade de saída pública.
 - Validação executada nesta fase: `pytest -q tests/test_market_scanner.py` com **13 passed** e `pytest -q` com **52 passed**.
+- Implementada observabilidade operacional estruturada com `core/ops_metrics.py`, persistência JSONL append-safe em `data/ops_metrics/` e schema mínimo (`ts_utc`, `component`, `run_id`, `duration_ms`, `status`, `error_count`, `payload`).
+- Integrado `scripts/firehose_miner.py` para emissão de métrica operacional ao final do `run`, incluindo throughput e contadores principais sem alterar o contrato da CLI.
+- Integrado `core/market_scanner.py` para emissão de métrica por execução de `scan_opportunities`, com status `ok/error` baseado em erros parciais já degradados no ciclo.
+- Adicionado `scripts/model_registry.py` com registry simples em `data/model_registry/registry.json`, registro de candidatos por família e promoção automática por regra mínima (`rmse < baseline_rmse`).
+- Integrado `scripts/train_oracle.py` ao registry para registrar candidatos, executar promoção automática e persistir decisão de registry por família no metadata da execução.
+- Integrado `core/ml_oracle.py` para resolver modelo ativo por família via registry com fallback compatível para `data/price_oracle_<family>.xgb` quando registry ausente/inválido.
+- Adicionados/atualizados testes em `tests/test_model_registry.py`, `tests/test_train_oracle.py`, `tests/test_ml_oracle.py`, `tests/test_market_scanner.py` e `tests/test_firehose_miner.py` cobrindo métricas operacionais, registry e fallback legado.
+- Validação executada nesta fase: `pytest -q tests/test_model_registry.py tests/test_train_oracle.py tests/test_ml_oracle.py tests/test_market_scanner.py tests/test_firehose_miner.py` com **36 passed** e `pytest -q` com **60 passed**.
 
 ## 2026-03-10
 

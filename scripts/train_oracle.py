@@ -20,6 +20,7 @@ from core.api_integrator import MarketAPIClient
 from core.item_normalizer import ITEM_FAMILIES, normalize_trade_item
 from core.meta_analyzer import LadderAnalyzer, MetaScores, calculate_meta_utility_score
 from core.ml_oracle import FAMILY_FEATURE_SCHEMAS, PricePredictor
+from scripts.model_registry import register_and_evaluate_candidate
 
 
 class TrainingGateError(Exception):
@@ -793,6 +794,7 @@ def train_xgboost_oracle(
     parquet_path: str = "data/firehose.parquet",
 ) -> None:
     print("[Training] Iniciando treino por família")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     trained_at_utc = (
         datetime.now(timezone.utc)
         .replace(microsecond=0)
@@ -846,6 +848,16 @@ def train_xgboost_oracle(
         print(
             f"[Family {report['family']}] rows={report['rows_total']} rmse={metrics['rmse']:.2f} mae={metrics['mae']:.2f} model={report['model_path']}"
         )
+
+    for report in trained_reports:
+        decision = register_and_evaluate_candidate(
+            family=str(report["family"]),
+            run_id=run_id,
+            model_path=str(report["model_path"]),
+            model_sha256=str(report["model_sha256"]),
+            metrics=cast(Dict[str, Any], report.get("metrics", {})),
+        )
+        report["registry_decision"] = decision
 
     metadata_path = persist_model_metadata(
         source=source,

@@ -13,6 +13,7 @@ from core.item_normalizer import (
     normalize_trade_item,
 )
 from core.ml_oracle import PricePredictor, ValuationResult
+from core.ops_metrics import append_metric_event
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,7 @@ class OnDemandScanner:
         self._query_budget_per_cycle = 8
         self._fetch_budget_per_cycle = 12
         self._stage_a_candidate_cap = 120
+        self._scan_error_count = 0
         logger.info(
             "[%s] Scanner inicializado com %s taxas de moeda",
             self.api_client.league,
@@ -329,6 +331,7 @@ class OnDemandScanner:
         try:
             return self.api_client.search_items(query)
         except Exception as exc:
+            self._scan_error_count += 1
             logger.warning("Falha em search_items; continuando ciclo: %s", exc)
             return "", []
 
@@ -338,8 +341,51 @@ class OnDemandScanner:
         try:
             return self.api_client.fetch_item_details(item_ids, query_id)
         except Exception as exc:
+            self._scan_error_count += 1
             logger.warning("Falha em fetch_item_details; continuando ciclo: %s", exc)
             return []
+
+    def _emit_scan_metric(
+        self,
+        *,
+        run_id: str,
+        started_at: float,
+        status: str,
+        stats: ScanStats,
+        max_items: int,
+        item_class: str,
+        safe_buy: bool,
+    ) -> None:
+        duration_ms = max((time.time() - started_at) * 1000.0, 0.0)
+        try:
+            append_metric_event(
+                component="market_scanner.scan_opportunities",
+                run_id=run_id,
+                duration_ms=duration_ms,
+                status=status,
+                error_count=self._scan_error_count,
+                payload={
+                    "resolved_league": stats.resolved_league,
+                    "scan_profile": stats.scan_profile,
+                    "max_items": max_items,
+                    "item_class": item_class,
+                    "safe_buy": safe_buy,
+                    "total_found": stats.total_found,
+                    "total_evaluated": stats.total_evaluated,
+                    "stage_a_candidates": stats.stage_a_candidates,
+                    "stage_b_passed": stats.stage_b_passed,
+                    "macro_queries": stats.macro_queries,
+                    "micro_queries": stats.micro_queries,
+                    "deduped_ttl": stats.deduped_ttl,
+                    "avg_profit": stats.avg_profit,
+                    "max_profit": stats.max_profit,
+                    "avg_score": stats.avg_score,
+                },
+            )
+        except Exception:
+            logger.debug(
+                "Falha ao emitir métrica operacional do scanner", exc_info=True
+            )
 
     def _passes_stage_b_consensus(self, opportunity: ScanOpportunity) -> bool:
         ml_signal = (
@@ -705,11 +751,27 @@ class OnDemandScanner:
         stale_hours: float = 48.0,
         safe_buy: bool = False,
     ) -> Tuple[List[ScanOpportunity], ScanStats]:
-        scan_profile = self._scan_profile(item_class)
+        run_id = str(int(time.time() * 1000))
+        started_at = time.time()
+        self._scan_error_count = 0
+
         if max_items <= 0:
-            return [], ScanStats(
-                resolved_league=self.api_client.league, scan_profile=scan_profile
+            stats = ScanStats(
+                resolved_league=self.api_client.league,
+                scan_profile=self._scan_profile(item_class),
             )
+            self._emit_scan_metric(
+                run_id=run_id,
+                started_at=started_at,
+                status="ok",
+                stats=stats,
+                max_items=max_items,
+                item_class=item_class,
+                safe_buy=safe_buy,
+            )
+            return [], stats
+
+        scan_profile = self._scan_profile(item_class)
 
         now_ts = time.time()
         self._cleanup_ttl_cache(now_ts)
@@ -792,7 +854,7 @@ class OnDemandScanner:
         )
 
         if not candidate_query_map:
-            return [], ScanStats(
+            stats = ScanStats(
                 resolved_league=self.api_client.league,
                 scan_profile=scan_profile,
                 macro_queries=macro_queries_executed,
@@ -800,6 +862,16 @@ class OnDemandScanner:
                 stage_a_candidates=0,
                 budget_exhausted=budget_exhausted,
             )
+            self._emit_scan_metric(
+                run_id=run_id,
+                started_at=started_at,
+                status="error" if self._scan_error_count > 0 else "ok",
+                stats=stats,
+                max_items=max_items,
+                item_class=item_class,
+                safe_buy=safe_buy,
+            )
+            return [], stats
 
         raw_opportunities: List[tuple[ScanOpportunity, NormalizedMarketItem]] = []
         total_evaluated = 0
@@ -946,6 +1018,15 @@ class OnDemandScanner:
             stage_a_candidates=len(candidate_query_map),
             stage_b_passed=len(stage_b_opportunities),
             budget_exhausted=budget_exhausted,
+        )
+        self._emit_scan_metric(
+            run_id=run_id,
+            started_at=started_at,
+            status="error" if self._scan_error_count > 0 else "ok",
+            stats=stats,
+            max_items=max_items,
+            item_class=item_class,
+            safe_buy=safe_buy,
         )
         return filtered_opportunities, stats
 

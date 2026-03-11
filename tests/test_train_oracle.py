@@ -3,8 +3,10 @@ import pandas as pd
 import pytest
 import sqlite3
 import json
+from pathlib import Path
 
 from scripts.train_oracle import (
+    train_xgboost_oracle,
     calculate_feature_overlap,
     calculate_rmse_by_bucket,
     fetch_training_data_from_parquet,
@@ -241,3 +243,67 @@ def test_persist_model_metadata_writes_expected_structure(tmp_path) -> None:
     assert "dataset_hash" in payload["dataset"]
     assert payload["models"][0]["family"] == "wand_caster"
     assert "model_sha256" in payload["models"][0]
+
+
+def test_train_registers_registry_decision_in_metadata(monkeypatch) -> None:
+    dataset = pd.DataFrame(
+        {
+            "item_family": ["generic"] * 30,
+            "price_chaos": np.linspace(10.0, 40.0, 30),
+            "ilvl": np.arange(30),
+            "has_life": [0.0, 1.0] * 15,
+        }
+    )
+    captured = {"models": []}
+
+    monkeypatch.setattr("scripts.train_oracle.ITEM_FAMILIES", ["generic"])
+    monkeypatch.setattr(
+        "scripts.train_oracle.load_training_dataframe", lambda **_: dataset
+    )
+    monkeypatch.setattr(
+        "scripts.train_oracle.run_quality_gates",
+        lambda _df: {
+            "duplicate_ratio": 0.0,
+            "target_unique": 20,
+            "target_std": 1.0,
+            "max_family_rows": 30,
+            "audit": {"rows": 30, "exact_duplicates": 0},
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.train_oracle._train_family_model",
+        lambda *_args, **_kwargs: {
+            "family": "generic",
+            "rows_total": 30,
+            "rows_train": 24,
+            "rows_test": 6,
+            "feature_schema": ["ilvl", "has_life"],
+            "feature_schema_hash": "schema-hash",
+            "split_strategy": "random",
+            "metrics": {"rmse": 5.0, "mae": 4.0, "baseline_rmse": 7.0},
+            "model_path": "data/price_oracle_generic.xgb",
+            "model_sha256": "model-hash",
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.train_oracle.register_and_evaluate_candidate",
+        lambda **_kwargs: {
+            "family": "generic",
+            "status": "active",
+            "promoted": True,
+            "reason": "rmse_lt_baseline",
+        },
+    )
+
+    def _capture_metadata(**kwargs):
+        captured["models"] = kwargs["model_reports"]
+        return Path("data/model_metadata/fake.json")
+
+    monkeypatch.setattr(
+        "scripts.train_oracle.persist_model_metadata", _capture_metadata
+    )
+
+    train_xgboost_oracle(source="api")
+
+    assert captured["models"]
+    assert captured["models"][0]["registry_decision"]["status"] == "active"

@@ -391,3 +391,24 @@ class TestHybridScannerPhase4:
         assert "score" in results[0]
         assert hasattr(stats, "total_found")
         assert hasattr(stats, "avg_profit")
+
+    def test_scan_emits_operational_metric_with_error_status(
+        self, scanner, monkeypatch
+    ):
+        captured = {}
+
+        def _capture_metric(**kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr("core.market_scanner.append_metric_event", _capture_metric)
+        scanner._query_budget_per_cycle = 1
+        scanner._build_micro_queries = MagicMock(return_value=[])
+        scanner.api_client.search_items = MagicMock(side_effect=RuntimeError("boom"))
+
+        opportunities, stats = scanner.scan_opportunities(max_items=2)
+
+        assert opportunities == []
+        assert stats.total_found == 0
+        assert captured["component"] == "market_scanner.scan_opportunities"
+        assert captured["status"] == "error"
+        assert captured["error_count"] >= 1

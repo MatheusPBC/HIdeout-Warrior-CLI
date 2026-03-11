@@ -1,6 +1,7 @@
 import sqlite3
 
 from scripts.firehose_miner import (
+    run,
     ingest_stash_page,
     initialize_database,
     is_useful_item,
@@ -103,3 +104,50 @@ def test_checkpoint_updates_after_success() -> None:
     ).fetchone()
 
     assert checkpoint == ("next-123", 1, 1, 0)
+
+
+def test_run_emits_operational_metric(tmp_path, monkeypatch) -> None:
+    payload = {
+        "next_change_id": "next-1",
+        "stashes": [
+            {
+                "stash": "s1",
+                "league": "Standard",
+                "accountName": "seller",
+                "items": [
+                    {
+                        "id": "item-3",
+                        "frameType": 2,
+                        "note": "~price 7 chaos",
+                        "baseType": "Imbued Wand",
+                        "name": "",
+                        "ilvl": 84,
+                        "indexed": "2026-03-11T10:00:00Z",
+                    }
+                ],
+            }
+        ],
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        "scripts.firehose_miner.fetch_stash_page",
+        lambda *_args, **_kwargs: payload,
+    )
+
+    def _capture_metric(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("scripts.firehose_miner.append_metric_event", _capture_metric)
+
+    run(
+        db_path=str(tmp_path / "firehose.db"),
+        start_change_id="boot",
+        max_pages=1,
+        sleep_seconds=0.0,
+    )
+
+    assert captured["component"] == "firehose_miner.run"
+    assert captured["status"] == "ok"
+    assert captured["payload"]["pages_processed"] == 1
+    assert "throughput_items_per_sec" in captured["payload"]

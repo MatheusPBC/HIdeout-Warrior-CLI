@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Set, Tuple, TYPE_CHECKING
@@ -136,6 +137,39 @@ class PricePredictor:
 
     def _resolve_model_path(self, family: str) -> Path:
         project_root = Path(__file__).resolve().parents[1]
+        registry_path = project_root / "data" / "model_registry" / "registry.json"
+        if registry_path.exists():
+            try:
+                registry = json.loads(registry_path.read_text(encoding="utf-8"))
+                families = (
+                    registry.get("families", {}) if isinstance(registry, dict) else {}
+                )
+                family_entry = (
+                    families.get(family, {}) if isinstance(families, dict) else {}
+                )
+                active_version = family_entry.get("active_version")
+                versions = family_entry.get("versions", [])
+                if active_version and isinstance(versions, list):
+                    for version in versions:
+                        if isinstance(version, dict) and str(
+                            version.get("run_id", "")
+                        ) == str(active_version):
+                            candidate_path = version.get("model_path")
+                            if (
+                                not isinstance(candidate_path, str)
+                                or not candidate_path
+                            ):
+                                break
+                            candidate_model_path = Path(candidate_path)
+                            if not candidate_model_path.is_absolute():
+                                candidate_model_path = (
+                                    project_root / candidate_model_path
+                                )
+                            if candidate_model_path.exists():
+                                return candidate_model_path
+                            break
+            except Exception:
+                pass
         return project_root / "data" / f"price_oracle_{family}.xgb"
 
     def _load_xgboost_models(self) -> None:
@@ -188,7 +222,9 @@ class PricePredictor:
     ) -> pd.DataFrame:
         normalized = self._coerce_normalized_item(item)
         chosen_family = family or normalized.item_family
-        schema = FAMILY_FEATURE_SCHEMAS.get(chosen_family, FAMILY_FEATURE_SCHEMAS["generic"])
+        schema = FAMILY_FEATURE_SCHEMAS.get(
+            chosen_family, FAMILY_FEATURE_SCHEMAS["generic"]
+        )
         feature_map = self._feature_map(normalized)
         row = {column: feature_map.get(column, 0.0) for column in schema}
         return pd.DataFrame([row], columns=schema)
@@ -209,10 +245,14 @@ class PricePredictor:
         return round(max(0.2, hits / max(len(required), 1)), 2)
 
     def _fallback_value(self, item: NormalizedMarketItem) -> float:
-        weights = self._TOKEN_WEIGHTS.get(item.item_family, self._TOKEN_WEIGHTS["generic"])
+        weights = self._TOKEN_WEIGHTS.get(
+            item.item_family, self._TOKEN_WEIGHTS["generic"]
+        )
         token_value = sum(weights.get(token, 8.0) for token in item.mod_tokens)
         synergy_bonus = 0.0
-        for token_set, bonus in self._FAMILY_SYNERGIES.get(item.item_family, {}).items():
+        for token_set, bonus in self._FAMILY_SYNERGIES.get(
+            item.item_family, {}
+        ).items():
             if token_set.issubset(set(item.mod_tokens)):
                 synergy_bonus = max(synergy_bonus, bonus)
         ilvl_bonus = max(0.0, item.ilvl - 75) * 1.5
@@ -225,9 +265,19 @@ class PricePredictor:
             "accessory_generic": 15.0,
             "generic": 10.0,
         }.get(item.item_family, 10.0)
-        return round(base_floor + token_value + synergy_bonus + ilvl_bonus + openness_bonus + influence_bonus, 1)
+        return round(
+            base_floor
+            + token_value
+            + synergy_bonus
+            + ilvl_bonus
+            + openness_bonus
+            + influence_bonus,
+            1,
+        )
 
-    def _fallback_confidence(self, item: NormalizedMarketItem, model_loaded: bool) -> float:
+    def _fallback_confidence(
+        self, item: NormalizedMarketItem, model_loaded: bool
+    ) -> float:
         confidence = 0.35 if not model_loaded else 0.55
         confidence += self._feature_completeness(item) * 0.25
         if item.item_family != "generic":
@@ -276,7 +326,9 @@ class PricePredictor:
             feature_completeness=feature_completeness,
         )
 
-    def predict_value(self, item: NormalizedMarketItem | "ItemState") -> Tuple[float, float]:
+    def predict_value(
+        self, item: NormalizedMarketItem | "ItemState"
+    ) -> Tuple[float, float]:
         result = self.predict(item)
         return (result.predicted_value, result.confidence)
 
@@ -308,4 +360,3 @@ class CraftingHeuristic:
                 return True
 
         return False
-

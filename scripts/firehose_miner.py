@@ -8,6 +8,8 @@ import requests
 import typer
 from rich import print
 
+from core.ops_metrics import append_metric_event
+
 PUBLIC_STASH_URL = "https://www.pathofexile.com/api/public-stash-tabs"
 
 CURRENCY_ALIASES = {
@@ -301,6 +303,7 @@ def run(
         1.5, "--sleep-seconds", help="Delay between pages"
     ),
 ) -> None:
+    run_id = str(int(time.time() * 1000))
     db_file = Path(db_path)
     db_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -316,8 +319,10 @@ def run(
     session = requests.Session()
     total_inserted = 0
     total_duplicates = 0
+    fetch_failures = 0
     pages_processed = 0
     started_at = time.time()
+    status = "ok"
 
     try:
         while True:
@@ -326,6 +331,7 @@ def run(
 
             response_payload = fetch_stash_page(session, current_change_id)
             if response_payload is None:
+                fetch_failures += 1
                 print("[red]falha ao obter página; continuando loop[/red]")
                 time.sleep(max(sleep_seconds, 1.0))
                 continue
@@ -363,11 +369,33 @@ def run(
                 f"[green]page={pages_processed} inserted={inserted} dup={duplicates} total={total_inserted} throughput={throughput:.2f} items/s[/green]"
             )
             time.sleep(max(sleep_seconds, 0.0))
+    except Exception:
+        status = "error"
+        raise
     finally:
         conn.close()
         session.close()
 
     elapsed = max(time.time() - started_at, 0.001)
+    throughput = total_inserted / elapsed
+    try:
+        append_metric_event(
+            component="firehose_miner.run",
+            run_id=run_id,
+            duration_ms=elapsed * 1000,
+            status="error" if fetch_failures > 0 or status == "error" else "ok",
+            error_count=fetch_failures,
+            payload={
+                "pages_processed": pages_processed,
+                "events_ingested": total_inserted,
+                "duplicates_skipped": total_duplicates,
+                "throughput_items_per_sec": round(throughput, 4),
+                "db_path": db_path,
+                "max_pages": max_pages,
+            },
+        )
+    except Exception:
+        pass
     print(
         f"[bold cyan]finalizado[/bold cyan] pages={pages_processed} inserted={total_inserted} duplicates={total_duplicates} elapsed={elapsed:.1f}s"
     )
