@@ -2,6 +2,7 @@ import os
 import sys
 import types
 import json
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -49,8 +50,28 @@ def test_family_feature_schema_and_inference_frame_columns():
         _normalized_wand(), family="wand_caster"
     )
 
-    assert tuple(frame.columns) == FAMILY_FEATURE_SCHEMAS["wand_caster"]
-    assert frame.shape == (1, len(FAMILY_FEATURE_SCHEMAS["wand_caster"]))
+    schema = FAMILY_FEATURE_SCHEMAS["wand_caster"]
+    assert tuple(frame.columns[: len(schema)]) == schema
+    assert frame.shape[0] == 1
+
+
+def test_inference_dataframe_keeps_numeric_mod_features_for_legacy_reindex():
+    wand = replace(
+        _normalized_wand(),
+        numeric_mod_features={
+            "spell_damage_pct": 66.0,
+            "cast_speed_pct": 14.0,
+            "spell_crit_pct": 20.0,
+        },
+    )
+
+    predictor = PricePredictor()
+    frame = predictor._build_inference_dataframe(wand, family="wand_caster")
+
+    assert "spell_damage_pct" in frame.columns
+    assert "cast_speed_pct" in frame.columns
+    assert float(frame.loc[0, "spell_damage_pct"]) == 66.0
+    assert float(frame.loc[0, "cast_speed_pct"]) == 14.0
 
 
 def test_predict_routes_to_family_fallback_and_returns_structured_result(monkeypatch):

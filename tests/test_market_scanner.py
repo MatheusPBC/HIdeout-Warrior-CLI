@@ -155,7 +155,7 @@ class TestScanProfiles:
 
         assert opportunities == []
         assert stats.scan_profile == "open_market"
-        assert stats.filtered_open_confidence == 1
+        assert stats.stage_b_passed == 0
 
     def test_targeted_scan_keeps_item_rejected_by_open_market(
         self, scanner_with_mock_rates
@@ -170,7 +170,7 @@ class TestScanProfiles:
         )
         scanner_with_mock_rates.oracle.predict = MagicMock(
             return_value=ValuationResult(
-                35.0, 0.55, "wand_caster", "family_fallback", 0.5
+                35.0, 0.75, "wand_caster", "family_fallback", 0.5
             )
         )
 
@@ -213,7 +213,7 @@ class TestScanProfiles:
             item_class="", max_items=2
         )
 
-        assert len(opportunities) == 2
+        assert len(opportunities) == 1
         assert opportunities[0].market_floor > 0
         assert opportunities[0].comparables_count >= 1
         assert opportunities[0].pricing_position in {
@@ -263,6 +263,143 @@ class TestScanProfiles:
         returned_ids = {opportunity.item_id for opportunity in opportunities}
         assert returned_ids == {"item_low_price", "item_mid_price"}
         assert stats.filtered_safe_buy_confidence == 1
+
+    def test_stage_a_discards_fractured_low_ilvl_before_oracle(
+        self, scanner_with_mock_rates
+    ):
+        detail = _make_item_detail(
+            item_id="fractured-low-ilvl",
+            base_type="Imbued Wand",
+            ilvl=77,
+            fractured=True,
+            price_amount=50.0,
+            explicit_mods=["40% increased Spell Damage"],
+        )
+        scanner_with_mock_rates.api_client.search_items = MagicMock(
+            return_value=("q1", ["fractured-low-ilvl"])
+        )
+        scanner_with_mock_rates.api_client.fetch_item_details = MagicMock(
+            return_value=[detail]
+        )
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            return_value=ValuationResult(
+                150.0, 0.9, "wand_caster", "family_fallback", 0.9
+            )
+        )
+
+        opportunities, stats = scanner_with_mock_rates.scan_opportunities(
+            item_class="Imbued Wand", max_items=2, anti_fix=False
+        )
+
+        assert opportunities == []
+        assert stats.total_evaluated == 0
+        assert stats.filtered_stage_a_fractured_low_ilvl_brick >= 1
+        scanner_with_mock_rates.oracle.predict.assert_not_called()
+
+    def test_low_ilvl_without_twink_fails_high_ticket_fallback_with_few_comparables(
+        self, scanner_with_mock_rates
+    ):
+        detail = _make_item_detail(
+            item_id="low-ilvl-no-twink",
+            base_type="Imbued Wand",
+            ilvl=79,
+            price_amount=120.0,
+            explicit_mods=["45% increased Spell Damage"],
+        )
+        scanner_with_mock_rates.api_client.search_items = MagicMock(
+            return_value=("q1", ["low-ilvl-no-twink"])
+        )
+        scanner_with_mock_rates.api_client.fetch_item_details = MagicMock(
+            return_value=[detail]
+        )
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            return_value=ValuationResult(
+                220.0, 0.82, "wand_caster", "family_fallback", 0.7
+            )
+        )
+
+        opportunities, stats = scanner_with_mock_rates.scan_opportunities(
+            item_class="Imbued Wand", max_items=3, anti_fix=False
+        )
+
+        assert opportunities == []
+        assert stats.stage_b_passed == 0
+
+    def test_low_ilvl_with_twink_override_bypasses_high_ticket_gate(
+        self, scanner_with_mock_rates
+    ):
+        detail = _make_item_detail(
+            item_id="low-ilvl-with-twink",
+            base_type="Imbued Wand",
+            ilvl=70,
+            price_amount=80.0,
+            explicit_mods=[
+                "+1 to Level of all Spell Skill Gems",
+                "45% increased Spell Damage",
+            ],
+        )
+        scanner_with_mock_rates.api_client.search_items = MagicMock(
+            return_value=("q1", ["low-ilvl-with-twink"])
+        )
+        scanner_with_mock_rates.api_client.fetch_item_details = MagicMock(
+            return_value=[detail]
+        )
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            return_value=ValuationResult(
+                220.0, 0.86, "wand_caster", "family_fallback", 0.8
+            )
+        )
+
+        opportunities, stats = scanner_with_mock_rates.scan_opportunities(
+            item_class="Imbued Wand", max_items=3, anti_fix=False
+        )
+
+        assert len(opportunities) == 1
+        assert stats.stage_b_passed == 1
+        assert opportunities[0].twink_override is True
+
+    def test_family_fallback_low_evidence_applies_cap_and_explains(
+        self, scanner_with_mock_rates
+    ):
+        details = [
+            _make_item_detail(
+                item_id="cap-target",
+                base_type="Imbued Wand",
+                ilvl=84,
+                price_amount=10.0,
+                explicit_mods=["40% increased Spell Damage"],
+            ),
+            _make_item_detail(
+                item_id="cap-comparable",
+                base_type="Imbued Wand",
+                ilvl=84,
+                price_amount=20.0,
+                explicit_mods=["40% increased Spell Damage"],
+            ),
+        ]
+        scanner_with_mock_rates.api_client.search_items = MagicMock(
+            return_value=("q1", ["cap-target", "cap-comparable"])
+        )
+        scanner_with_mock_rates.api_client.fetch_item_details = MagicMock(
+            return_value=details
+        )
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            side_effect=[
+                ValuationResult(500.0, 0.9, "wand_caster", "family_fallback", 0.7),
+                ValuationResult(40.0, 0.9, "wand_caster", "family_fallback", 0.7),
+            ]
+        )
+
+        opportunities, _ = scanner_with_mock_rates.scan_opportunities(
+            item_class="Imbued Wand", max_items=3, anti_fix=False
+        )
+
+        assert len(opportunities) >= 1
+        capped = next(op for op in opportunities if op.item_id == "cap-target")
+        assert capped.ml_value == 32.0
+        assert "fallback_low_evidence" in capped.risk_flags
+        assert capped.valuation_result.get("ml_value_cap_applied") is True
+        assert "cap=500.0->32.0" in capped.valuation_explanation
 
 
 class TestHybridScannerPhase4:
@@ -389,6 +526,8 @@ class TestHybridScannerPhase4:
         assert isinstance(results[0], dict)
         assert "base_type" in results[0]
         assert "score" in results[0]
+        assert "valuation_explanation" in results[0]
+        assert results[0]["valuation_explanation"]
         assert hasattr(stats, "total_found")
         assert hasattr(stats, "avg_profit")
 

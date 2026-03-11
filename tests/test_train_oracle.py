@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 
 from scripts.train_oracle import (
+    ILVL_BANDS,
+    _train_family_band_models,
+    classify_ilvl_band,
     train_xgboost_oracle,
     calculate_feature_overlap,
     calculate_rmse_by_bucket,
@@ -17,6 +20,67 @@ from scripts.train_oracle import (
     split_dataset_for_training,
     TrainingGateError,
 )
+
+
+def test_classify_ilvl_band_boundaries() -> None:
+    assert classify_ilvl_band(60) == "low"
+    assert classify_ilvl_band(74) == "low"
+    assert classify_ilvl_band(75) == "mid"
+    assert classify_ilvl_band(83) == "mid"
+    assert classify_ilvl_band(84) == "high"
+
+
+def test_train_family_band_models_trains_when_band_has_minimum_rows(
+    monkeypatch, tmp_path
+) -> None:
+    family_df = pd.DataFrame(
+        {
+            "item_family": ["wand_caster"] * 50,
+            "ilvl": [70] * 10 + [78] * 20 + [86] * 20,
+            "price_chaos": np.linspace(10.0, 200.0, 50),
+            "has_spell_damage": [1.0] * 50,
+            "has_cast_speed": [1.0] * 50,
+            "has_spell_crit": [0.0] * 50,
+            "open_affixes": [2.0] * 50,
+            "is_influenced": [0.0] * 50,
+            "mod_count": [2.0] * 50,
+            "meta_utility_score": [0.0] * 50,
+        }
+    )
+
+    def _fake_train_family_model(
+        family,
+        subset_df,
+        output_dir,
+        model_suffix="",
+        report_context=None,
+    ):
+        payload = {
+            "family": family,
+            "rows_total": int(len(subset_df)),
+            "model_path": str(output_dir / f"price_oracle_{family}{model_suffix}.xgb"),
+            "metrics": {"rmse": 1.0, "mae": 1.0},
+        }
+        if report_context:
+            payload.update(report_context)
+        return payload
+
+    monkeypatch.setattr(
+        "scripts.train_oracle._train_family_model", _fake_train_family_model
+    )
+
+    reports = _train_family_band_models(
+        family="wand_caster",
+        family_df=family_df,
+        output_dir=tmp_path,
+        min_rows_per_band=20,
+    )
+
+    by_band = {report["ilvl_band"]: report for report in reports}
+    assert set(by_band.keys()) == set(ILVL_BANDS.keys())
+    assert by_band["low"]["fallback_to_family"] is True
+    assert by_band["mid"]["trained"] is True
+    assert by_band["high"]["trained"] is True
 
 
 def test_split_dataset_for_training_uses_temporal_order_without_inversion() -> None:

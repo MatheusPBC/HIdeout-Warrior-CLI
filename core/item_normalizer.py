@@ -1,3 +1,4 @@
+import re
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
@@ -11,6 +12,24 @@ ITEM_FAMILIES = (
     "accessory_generic",
     "generic",
 )
+
+LOW_ILVL_THRESHOLDS = {
+    "wand_caster": 82,
+    "body_armour_defense": 84,
+    "jewel_cluster": 84,
+    "accessory_generic": 82,
+    "generic": 80,
+}
+
+HIGH_TIER_MIN_ILVL_THRESHOLDS = {
+    "wand_caster": 82,
+    "body_armour_defense": 84,
+    "jewel_cluster": 84,
+    "accessory_generic": 80,
+    "generic": 78,
+}
+
+HIGH_TIER_MAX_RANK = 2
 
 
 @dataclass(frozen=True)
@@ -36,6 +55,13 @@ class NormalizedMarketItem:
     open_suffixes: int = 3
     mod_tokens: List[str] = field(default_factory=list)
     tag_tokens: List[str] = field(default_factory=list)
+    numeric_mod_features: Dict[str, float] = field(default_factory=dict)
+    tier_source: str = "none"
+    native_tier_count: int = 0
+    twink_override: bool = False
+    tier_ilvl_mismatch: bool = False
+    low_ilvl_context: bool = False
+    fractured_low_ilvl_brick: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -72,34 +98,176 @@ def _normalize_mod_text(mod: str) -> str:
     return mod.lower().replace("%", " percent ").replace("+", " ")
 
 
-def _extract_mod_tokens(explicit_mods: Iterable[str], implicit_mods: Iterable[str]) -> List[str]:
+_FLOAT_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+_TWINK_OVERRIDE_RE = re.compile(
+    r"\+(\d+)\s+to\s+level\s+of\s+all\s+.+?skill\s+gems",
+    re.IGNORECASE,
+)
+
+
+def _extract_numbers(mod: str) -> List[float]:
+    values: List[float] = []
+    for raw in _FLOAT_RE.findall(mod):
+        try:
+            values.append(float(raw))
+        except ValueError:
+            continue
+    return values
+
+
+def _extract_mod_tokens(
+    explicit_mods: Iterable[str], implicit_mods: Iterable[str]
+) -> List[str]:
     tokens: List[str] = []
     for mod in list(explicit_mods) + list(implicit_mods):
         text = _normalize_mod_text(mod)
         if "spell" in text and "damage" in text:
-            tokens.append("SpellDamage1")
+            tokens.append("SpellDamage")
         if "cast speed" in text or "casting speed" in text:
-            tokens.append("CastSpeed1")
+            tokens.append("CastSpeed")
         if "critical" in text and "spell" in text:
-            tokens.append("CritChanceSpells1")
+            tokens.append("CritChanceSpells")
         if "maximum life" in text or " life" in text:
-            tokens.append("Life1")
+            tokens.append("Life")
         if "suppress" in text:
-            tokens.append("SpellSuppress1")
+            tokens.append("SpellSuppress")
         if "resist" in text or "resistance" in text:
-            tokens.append("Resist1")
+            tokens.append("Resist")
         if "cluster" in text:
-            tokens.append("ClusterPassive1")
+            tokens.append("ClusterPassive")
         if "mana" in text:
-            tokens.append("Mana1")
-        if "attributes" in text or "strength" in text or "dexterity" in text or "intelligence" in text:
-            tokens.append("Attributes1")
+            tokens.append("Mana")
+        if (
+            "attributes" in text
+            or "strength" in text
+            or "dexterity" in text
+            or "intelligence" in text
+        ):
+            tokens.append("Attributes")
         if "chaos" in text:
-            tokens.append("Chaos1")
+            tokens.append("Chaos")
     return list(dict.fromkeys(tokens))
 
 
-def _extract_tag_tokens(base_type: str, mods: Iterable[str], influences: Iterable[str]) -> List[str]:
+def _extract_numeric_mod_features(mods: Iterable[str]) -> Dict[str, float]:
+    features = {
+        "spell_damage_pct": 0.0,
+        "cast_speed_pct": 0.0,
+        "spell_crit_pct": 0.0,
+        "life_flat": 0.0,
+        "resist_total": 0.0,
+        "plus_all_spell_gems": 0.0,
+    }
+
+    for mod in mods:
+        text = _normalize_mod_text(mod)
+        numbers = _extract_numbers(mod)
+        if not numbers:
+            continue
+
+        if "spell" in text and "damage" in text and "increased" in text:
+            features["spell_damage_pct"] += max(numbers)
+        if "cast speed" in text or "casting speed" in text:
+            features["cast_speed_pct"] += max(numbers)
+        if "critical" in text and "spell" in text and "chance" in text:
+            features["spell_crit_pct"] += max(numbers)
+        if "maximum life" in text:
+            features["life_flat"] += max(numbers)
+        if "resist" in text or "resistance" in text:
+            features["resist_total"] += sum(value for value in numbers if value > 0)
+
+        match = _TWINK_OVERRIDE_RE.search(mod)
+        if match and "spell" in text:
+            try:
+                features["plus_all_spell_gems"] = max(
+                    features["plus_all_spell_gems"],
+                    float(int(match.group(1))),
+                )
+            except (TypeError, ValueError):
+                pass
+
+    return features
+
+
+def _has_twink_override(mods: Iterable[str]) -> bool:
+    for mod in mods:
+        match = _TWINK_OVERRIDE_RE.search(mod)
+        if not match:
+            continue
+        try:
+            if int(match.group(1)) >= 1:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _native_tier_from_container(
+    container: Any,
+    detected_tiers: Dict[str, int],
+) -> int:
+    native_count = 0
+
+    if isinstance(container, dict):
+        tier_value = container.get("tier")
+        if isinstance(tier_value, (int, float)) and tier_value > 0:
+            native_count += 1
+            text = " ".join(
+                str(container.get(key, ""))
+                for key in ("name", "id", "mod", "text", "type")
+            ).lower()
+            if "spell" in text and "damage" in text:
+                detected_tiers["SpellDamage"] = min(
+                    detected_tiers.get("SpellDamage", int(tier_value)),
+                    int(tier_value),
+                )
+            if "cast speed" in text or "casting speed" in text:
+                detected_tiers["CastSpeed"] = min(
+                    detected_tiers.get("CastSpeed", int(tier_value)), int(tier_value)
+                )
+            if "critical" in text and "spell" in text:
+                detected_tiers["CritChanceSpells"] = min(
+                    detected_tiers.get("CritChanceSpells", int(tier_value)),
+                    int(tier_value),
+                )
+            if "life" in text:
+                detected_tiers["Life"] = min(
+                    detected_tiers.get("Life", int(tier_value)), int(tier_value)
+                )
+            if "resist" in text:
+                detected_tiers["Resist"] = min(
+                    detected_tiers.get("Resist", int(tier_value)), int(tier_value)
+                )
+            if "suppress" in text:
+                detected_tiers["SpellSuppress"] = min(
+                    detected_tiers.get("SpellSuppress", int(tier_value)),
+                    int(tier_value),
+                )
+
+        for value in container.values():
+            native_count += _native_tier_from_container(value, detected_tiers)
+    elif isinstance(container, list):
+        for value in container:
+            native_count += _native_tier_from_container(value, detected_tiers)
+
+    return native_count
+
+
+def _extract_native_tier_metadata(
+    item_data: Dict[str, Any],
+) -> tuple[Dict[str, int], int]:
+    detected_tiers: Dict[str, int] = {}
+    root_containers = [item_data.get("extended"), item_data.get("mods")]
+    native_count = 0
+    for container in root_containers:
+        if container is not None:
+            native_count += _native_tier_from_container(container, detected_tiers)
+    return detected_tiers, native_count
+
+
+def _extract_tag_tokens(
+    base_type: str, mods: Iterable[str], influences: Iterable[str]
+) -> List[str]:
     tags: List[str] = []
     base_lower = base_type.lower()
     if "wand" in base_lower:
@@ -165,6 +333,23 @@ def _count_affixes(mod_tokens: List[str], explicit_mods: List[str]) -> tuple[int
     return (prefix_count, suffix_count)
 
 
+def _is_low_ilvl_context(item_family: str, ilvl: int, twink_override: bool) -> bool:
+    if twink_override:
+        return False
+    threshold = LOW_ILVL_THRESHOLDS.get(item_family, LOW_ILVL_THRESHOLDS["generic"])
+    return ilvl < threshold
+
+
+def _is_implausible_high_tier(item_family: str, ilvl: int, tier: int) -> bool:
+    if tier > HIGH_TIER_MAX_RANK:
+        return False
+    threshold = HIGH_TIER_MIN_ILVL_THRESHOLDS.get(
+        item_family,
+        HIGH_TIER_MIN_ILVL_THRESHOLDS["generic"],
+    )
+    return ilvl < threshold
+
+
 def normalize_trade_item(
     item_json: Dict[str, Any],
     listed_price: float,
@@ -179,21 +364,51 @@ def normalize_trade_item(
 
     explicit_mods = list(item_data.get("explicitMods", []) or [])
     implicit_mods = list(item_data.get("implicitMods", []) or [])
+    all_mods = explicit_mods + implicit_mods
     influences = list((item_data.get("influences", {}) or {}).keys())
     mod_tokens = _extract_mod_tokens(explicit_mods, implicit_mods)
+    native_tiers, native_tier_count = _extract_native_tier_metadata(item_data)
+    ilvl = int(item_data.get("ilvl", 1) or 1)
     tag_tokens = _extract_tag_tokens(
         item_data.get("baseType", "Unknown Base"),
-        explicit_mods + implicit_mods,
+        all_mods,
         influences,
     )
     item_family = classify_item_family(item_data.get("baseType", ""), tag_tokens)
+    if native_tiers:
+        tier_ilvl_mismatch = False
+        for token, tier in native_tiers.items():
+            token_invalid = _is_implausible_high_tier(item_family, ilvl, tier)
+            if token_invalid:
+                tier_ilvl_mismatch = True
+            if token in mod_tokens:
+                suffix = "_approx" if token_invalid else ""
+                mod_tokens.append(f"{token}_T{tier}{suffix}")
+        mod_tokens = list(dict.fromkeys(mod_tokens))
+    else:
+        tier_ilvl_mismatch = False
+
+    numeric_mod_features = _extract_numeric_mod_features(all_mods)
+    twink_override = _has_twink_override(all_mods)
+    low_ilvl_context = _is_low_ilvl_context(item_family, ilvl, twink_override)
+    fractured_low_ilvl_brick = (
+        bool(item_data.get("fractured", False)) and low_ilvl_context
+    )
+
+    if native_tier_count > 0:
+        tier_source = "native"
+    elif any(value > 0 for value in numeric_mod_features.values()):
+        tier_source = "fallback_numeric"
+    else:
+        tier_source = "none"
+
     prefix_count, suffix_count = _count_affixes(mod_tokens, explicit_mods)
 
     return NormalizedMarketItem(
         item_id=item_data.get("id", ""),
         base_type=item_data.get("baseType", "Unknown Base"),
         item_family=item_family,
-        ilvl=int(item_data.get("ilvl", 1) or 1),
+        ilvl=ilvl,
         listed_price=round(float(listed_price), 1),
         listing_currency=listing_currency or "chaos",
         listing_amount=float(listing_amount or 0.0),
@@ -211,6 +426,13 @@ def normalize_trade_item(
         open_suffixes=max(0, 3 - suffix_count),
         mod_tokens=mod_tokens,
         tag_tokens=tag_tokens,
+        numeric_mod_features=numeric_mod_features,
+        tier_source=tier_source,
+        native_tier_count=native_tier_count,
+        twink_override=twink_override,
+        tier_ilvl_mismatch=tier_ilvl_mismatch,
+        low_ilvl_context=low_ilvl_context,
+        fractured_low_ilvl_brick=fractured_low_ilvl_brick,
     )
 
 
@@ -240,6 +462,16 @@ def normalized_item_from_item_state(item_state: "ItemState") -> NormalizedMarket
         open_suffixes=item_state.open_suffixes,
         mod_tokens=mod_tokens,
         tag_tokens=tag_tokens,
+        numeric_mod_features={},
+        tier_source="none",
+        native_tier_count=0,
+        twink_override=False,
+        tier_ilvl_mismatch=False,
+        low_ilvl_context=_is_low_ilvl_context(item_family, item_state.ilvl, False),
+        fractured_low_ilvl_brick=(
+            bool(item_state.is_fractured)
+            and _is_low_ilvl_context(item_family, item_state.ilvl, False)
+        ),
     )
 
 
@@ -267,7 +499,9 @@ def build_comparable_market_stats(
 
     if item.listed_price <= max(1.0, market_floor * 0.98):
         pricing_position = "below_floor"
-    elif item.listed_price > max(market_median * 1.35, market_floor + max(market_spread, 10.0)):
+    elif item.listed_price > max(
+        market_median * 1.35, market_floor + max(market_spread, 10.0)
+    ):
         pricing_position = "outlier"
     else:
         pricing_position = "near_market"
@@ -279,4 +513,3 @@ def build_comparable_market_stats(
         comparables_count=len(prices),
         pricing_position=pricing_position,
     )
-

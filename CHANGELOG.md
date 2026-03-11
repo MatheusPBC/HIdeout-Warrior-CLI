@@ -2,6 +2,18 @@
 
 ## 2026-03-11
 
+- Endurecido o pipeline de normalização em `core/item_normalizer.py` com `tier-first` seguro: extração de tier nativo, validação de plausibilidade por `ilvl`/família, marcação `tier_ilvl_mismatch` e tokenização `*_approx` quando o tier não é confiável para o contexto.
+- Adicionadas flags estruturadas de contexto no item normalizado (`low_ilvl_context`, `twink_override`, `fractured_low_ilvl_brick`, `tier_source`, `native_tier_count`) para governança explícita de risco no scanner e no valuation.
+- Reforçado o Stage A/Stage B em `core/market_scanner.py` com descarte precoce de `fractured_low_ilvl_brick`, contador dedicado em `ScanStats`, gate de `high-ticket` por `ilvl` mínimo e endurecimento de consenso para `family_fallback` com baixa evidência de mercado (`comparables_count < 3`).
+- Implementado cap explícito de `ml_value` para cenários de fallback fraco com poucos comparáveis, com rastreabilidade em `valuation_result` (`ml_value_before_cap`, `ml_value_after_cap`, `ml_value_cap_applied`) e explicação textual do motivo.
+- Expandida a pontuação de risco com penalidades explícitas para `low_ilvl_context`, `tier_ilvl_mismatch` e `fallback_low_evidence`, reduzindo promoção de outliers em contextos fracos.
+- Evoluída a explicabilidade em `core/market_scanner.py` com `valuation_explanation` detalhando fonte de tier, plausibilidade, cap aplicado e decisão final de consenso (aprovado/bloqueado + razão).
+- Ajustado `core/ml_oracle.py` para manter retrocompatibilidade de modelos legados enquanto incorpora features contínuas (`numeric_mod_features`) na inferência e harmoniza aliases de tokens antigos/novos.
+- Atualizado `scripts/train_oracle.py` com segmentação por faixa de `ilvl` (`low`, `mid`, `high`), treino por família+banda quando há volume mínimo e fallback controlado para family-only quando a banda não possui amostra suficiente, com metadata da decisão.
+- Atualizada a CLI (`cli.py`) para exibir a coluna `valuation_explanation` na tabela de scan quando disponível.
+- Adicionados/atualizados testes em `tests/test_item_normalizer.py`, `tests/test_market_scanner.py`, `tests/test_ml_oracle.py` e `tests/test_train_oracle.py` cobrindo mismatch de tier por `ilvl`, tokens `*_approx`, descarte Stage A, cap/bloqueio Stage B, bypass `twink_override` e treino por banda.
+- Validação executada nesta etapa: `pytest -q` com **86 passed**.
+
 - Adicionada a camada compartilhada `NormalizedMarketItem` em `core/item_normalizer.py` para unificar a normalização usada por scanner, valuation, treino e planner.
 - Segmentado o valuation por família em `core/ml_oracle.py`, com `ValuationResult` estruturado, roteamento por `wand_caster`, `body_armour_defense`, `jewel_cluster`, `accessory_generic` e fallback `generic`.
 - Enriquecido o scanner em `core/market_scanner.py` com contexto de mercado (`market_floor`, `market_median`, `comparables_count`, `market_spread`, `pricing_position`) e serialização desses campos em `ScanOpportunity`.

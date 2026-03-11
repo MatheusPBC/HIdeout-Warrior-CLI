@@ -43,6 +43,13 @@ class ListingSnapshot:
     open_suffixes: int = 3
     mod_tokens: List[str] = field(default_factory=list)
     tag_tokens: List[str] = field(default_factory=list)
+    numeric_mod_features: Dict[str, float] = field(default_factory=dict)
+    tier_source: str = "none"
+    native_tier_count: int = 0
+    twink_override: bool = False
+    tier_ilvl_mismatch: bool = False
+    low_ilvl_context: bool = False
+    fractured_low_ilvl_brick: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -63,6 +70,7 @@ class ScanStats:
     filtered_open_cheap_low_confidence: int = 0
     filtered_open_cheap_low_profit: int = 0
     filtered_open_cheap_stale: int = 0
+    filtered_stage_a_fractured_low_ilvl_brick: int = 0
     avg_profit: float = 0.0
     max_profit: float = 0.0
     avg_score: float = 0.0
@@ -116,6 +124,14 @@ class ScanOpportunity:
     market_spread: float = 0.0
     pricing_position: str = "near_market"
     risk_flags: List[str] = field(default_factory=list)
+    valuation_explanation: str = ""
+    numeric_mod_features: Dict[str, float] = field(default_factory=dict)
+    tier_source: str = "none"
+    native_tier_count: int = 0
+    twink_override: bool = False
+    low_ilvl_context: bool = False
+    tier_ilvl_mismatch: bool = False
+    fractured_low_ilvl_brick: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -161,6 +177,14 @@ class ScanOpportunity:
             market_spread=data.get("market_spread", 0.0),
             pricing_position=data.get("pricing_position", "near_market"),
             risk_flags=data.get("risk_flags", []),
+            valuation_explanation=data.get("valuation_explanation", ""),
+            numeric_mod_features=data.get("numeric_mod_features", {}),
+            tier_source=data.get("tier_source", "none"),
+            native_tier_count=data.get("native_tier_count", 0),
+            twink_override=data.get("twink_override", False),
+            low_ilvl_context=data.get("low_ilvl_context", False),
+            tier_ilvl_mismatch=data.get("tier_ilvl_mismatch", False),
+            fractured_low_ilvl_brick=data.get("fractured_low_ilvl_brick", False),
         )
 
 
@@ -373,6 +397,7 @@ class OnDemandScanner:
                     "total_found": stats.total_found,
                     "total_evaluated": stats.total_evaluated,
                     "stage_a_candidates": stats.stage_a_candidates,
+                    "filtered_stage_a_fractured_low_ilvl_brick": stats.filtered_stage_a_fractured_low_ilvl_brick,
                     "stage_b_passed": stats.stage_b_passed,
                     "macro_queries": stats.macro_queries,
                     "micro_queries": stats.micro_queries,
@@ -388,6 +413,56 @@ class OnDemandScanner:
             )
 
     def _passes_stage_b_consensus(self, opportunity: ScanOpportunity) -> bool:
+        consensus_ok, _ = self._stage_b_consensus_decision(opportunity)
+        return consensus_ok
+
+    def _high_ticket_ilvl_min(self, item_family: str) -> int:
+        minimums = {
+            "wand_caster": 75,
+            "body_armour_defense": 78,
+            "jewel_cluster": 80,
+            "accessory_generic": 75,
+            "generic": 75,
+        }
+        return minimums.get(item_family, minimums["generic"])
+
+    def _is_high_ticket(self, opportunity: ScanOpportunity) -> bool:
+        return opportunity.ml_value >= 150.0 or opportunity.profit >= 80.0
+
+    def _stage_b_consensus_decision(
+        self, opportunity: ScanOpportunity
+    ) -> Tuple[bool, str]:
+        if (
+            opportunity.low_ilvl_context
+            and not opportunity.twink_override
+            and opportunity.pricing_position == "outlier"
+        ):
+            return (False, "low_ilvl_outlier")
+
+        if (
+            self._is_high_ticket(opportunity)
+            and not opportunity.twink_override
+            and (
+                opportunity.low_ilvl_context
+                or opportunity.ilvl
+                < self._high_ticket_ilvl_min(opportunity.item_family)
+            )
+        ):
+            return (False, "high_ticket_low_ilvl_without_override")
+
+        if (
+            opportunity.valuation_result.get("model_source") == "family_fallback"
+            and opportunity.comparables_count < 3
+        ):
+            if opportunity.pricing_position == "outlier":
+                return (False, "fallback_low_evidence_outlier")
+            if opportunity.ml_confidence < 0.65:
+                return (False, "fallback_low_evidence_low_confidence")
+            if opportunity.profit < 15.0 and opportunity.relative_discount < 0.18:
+                return (False, "fallback_low_evidence_weak_value")
+            if opportunity.low_ilvl_context and not opportunity.twink_override:
+                return (False, "fallback_low_evidence_low_ilvl")
+
         ml_signal = (
             opportunity.profit > 0 and opportunity.ml_value > opportunity.listed_price
         )
@@ -406,7 +481,86 @@ class OnDemandScanner:
         elif opportunity.market_floor > 0:
             comparable_signal = opportunity.listed_price <= opportunity.market_floor
 
-        return ml_signal and comparable_signal
+        if not ml_signal:
+            return (False, "ml_signal_negative")
+        if not comparable_signal:
+            return (False, "market_signal_negative")
+        return (True, "ml_market_consensus_ok")
+
+    def _build_valuation_explanation(self, opportunity: ScanOpportunity) -> str:
+        summary = (
+            f"IA estima {opportunity.ml_value:.1f}c para {opportunity.base_type} "
+            f"(confiança {opportunity.ml_confidence:.2f}) contra {opportunity.listed_price:.1f}c "
+            f"listado, gap de {opportunity.profit:.1f}c."
+        )
+
+        if opportunity.comparables_count > 0:
+            market_context = (
+                f" Comparáveis: piso {opportunity.market_floor:.1f}c, "
+                f"mediana {opportunity.market_median:.1f}c, "
+                f"spread {opportunity.market_spread:.1f}c, "
+                f"posição {opportunity.pricing_position}."
+            )
+        else:
+            market_context = (
+                " Sem comparáveis suficientes; priorizando sinal do modelo."
+            )
+
+        if opportunity.risk_flags:
+            risk_context = f" Riscos: {', '.join(opportunity.risk_flags)}."
+        else:
+            risk_context = " Sem flags de risco relevantes."
+
+        plausibility_bits: List[str] = []
+        if opportunity.tier_source != "none":
+            plausibility_bits.append(f"tier_source={opportunity.tier_source}")
+        if opportunity.tier_ilvl_mismatch:
+            plausibility_bits.append("tier_ilvl_mismatch")
+        if opportunity.native_tier_count > 0:
+            plausibility_bits.append(f"native_tiers={opportunity.native_tier_count}")
+        if opportunity.twink_override:
+            plausibility_bits.append("twink_override")
+        if opportunity.low_ilvl_context and not opportunity.twink_override:
+            plausibility_bits.append("low_ilvl_context")
+        if opportunity.valuation_result.get("ml_value_cap_applied"):
+            cap_before = float(
+                opportunity.valuation_result.get(
+                    "ml_value_before_cap", opportunity.ml_value
+                )
+            )
+            cap_after = float(
+                opportunity.valuation_result.get(
+                    "ml_value_after_cap", opportunity.ml_value
+                )
+            )
+            plausibility_bits.append(f"cap={cap_before:.1f}->{cap_after:.1f}")
+        if plausibility_bits:
+            plausibility_context = f" Plausibilidade: {', '.join(plausibility_bits)}."
+        else:
+            plausibility_context = ""
+
+        consensus, reason = self._stage_b_consensus_decision(opportunity)
+        consensus_context = (
+            f" Consenso ML+mercado: aprovado ({reason})."
+            if consensus
+            else f" Consenso ML+mercado: bloqueado ({reason})."
+        )
+
+        return (
+            f"{summary}{market_context}{risk_context}{plausibility_context}"
+            f"{consensus_context}"
+        )
+
+    def _is_low_ilvl_by_family(self, item_family: str, ilvl: int) -> bool:
+        thresholds = {
+            "wand_caster": 82,
+            "body_armour_defense": 84,
+            "jewel_cluster": 84,
+            "accessory_generic": 82,
+            "generic": 80,
+        }
+        threshold = thresholds.get(item_family, thresholds["generic"])
+        return ilvl < threshold
 
     def extract_price_chaos(self, listing_json: dict) -> Optional[float]:
         price_info = listing_json.get("price", {})
@@ -510,6 +664,15 @@ class OnDemandScanner:
         if valuation.model_source == "family_fallback":
             flags.append("family_fallback")
 
+        if (
+            self._is_low_ilvl_by_family(item.item_family, item.ilvl)
+            and not item.twink_override
+        ):
+            flags.append("low_ilvl_context")
+
+        if item.tier_ilvl_mismatch:
+            flags.append("tier_ilvl_mismatch")
+
         return flags
 
     def _open_market_filter_reason(self, opportunity: ScanOpportunity) -> Optional[str]:
@@ -556,6 +719,9 @@ class OnDemandScanner:
             "cheap_listing": 18.0,
             "corrupted": 10.0,
             "family_fallback": 6.0,
+            "low_ilvl_context": 12.0,
+            "tier_ilvl_mismatch": 20.0,
+            "fallback_low_evidence": 15.0,
         }
         score -= sum(penalties.get(flag, 0.0) for flag in risk_flags)
         if "cheap_listing" in risk_flags and 0.45 <= valuation.confidence < 0.60:
@@ -632,13 +798,58 @@ class OnDemandScanner:
             open_suffixes=normalized_item.open_suffixes,
             mod_tokens=normalized_item.mod_tokens,
             tag_tokens=normalized_item.tag_tokens,
+            numeric_mod_features=normalized_item.numeric_mod_features,
+            tier_source=normalized_item.tier_source,
+            native_tier_count=normalized_item.native_tier_count,
+            twink_override=normalized_item.twink_override,
+            tier_ilvl_mismatch=normalized_item.tier_ilvl_mismatch,
+            low_ilvl_context=normalized_item.low_ilvl_context,
+            fractured_low_ilvl_brick=normalized_item.fractured_low_ilvl_brick,
         )
+
+    def _apply_low_evidence_cap(self, opportunity: ScanOpportunity) -> None:
+        if not (
+            opportunity.valuation_result.get("model_source") == "family_fallback"
+            and opportunity.comparables_count < 3
+        ):
+            return
+
+        if "fallback_low_evidence" not in opportunity.risk_flags:
+            opportunity.risk_flags.append("fallback_low_evidence")
+
+        anchor = opportunity.market_median
+        if anchor <= 0:
+            anchor = opportunity.market_floor
+        if anchor <= 0:
+            anchor = opportunity.listed_price
+        cap_multiplier = 1.6
+        cap_value = max(anchor * cap_multiplier, opportunity.listed_price * 1.1, 15.0)
+
+        if opportunity.ml_value <= cap_value:
+            return
+
+        before = float(opportunity.ml_value)
+        opportunity.ml_value = round(float(cap_value), 1)
+        opportunity.profit = round(opportunity.ml_value - opportunity.listed_price, 1)
+        opportunity.valuation_gap = opportunity.profit
+        opportunity.relative_discount = round(
+            max(opportunity.profit / max(opportunity.ml_value, 1.0), 0.0),
+            2,
+        )
+        opportunity.trusted_profit = round(
+            max(opportunity.profit, 0.0) * opportunity.ml_confidence,
+            1,
+        )
+        opportunity.valuation_result["ml_value_before_cap"] = before
+        opportunity.valuation_result["ml_value_after_cap"] = opportunity.ml_value
+        opportunity.valuation_result["ml_value_cap_applied"] = True
 
     def _build_opportunity(
         self,
         item_json: dict,
         query_id: str,
         stale_hours: float,
+        normalized_item: Optional[NormalizedMarketItem] = None,
     ) -> Optional[tuple[ScanOpportunity, NormalizedMarketItem]]:
         listing = item_json.get("listing", {})
         item_data = item_json.get("item", {})
@@ -646,13 +857,14 @@ class OnDemandScanner:
         if listed_price is None or not item_data:
             return None
 
-        price_info = listing.get("price", {})
-        normalized_item = normalize_trade_item(
-            item_json,
-            listed_price=listed_price,
-            listing_currency=price_info.get("currency", "chaos"),
-            listing_amount=float(price_info.get("amount", 0.0) or 0.0),
-        )
+        if normalized_item is None:
+            price_info = listing.get("price", {})
+            normalized_item = normalize_trade_item(
+                item_json,
+                listed_price=listed_price,
+                listing_currency=price_info.get("currency", "chaos"),
+                listing_amount=float(price_info.get("amount", 0.0) or 0.0),
+            )
         if normalized_item is None:
             return None
 
@@ -701,6 +913,16 @@ class OnDemandScanner:
             trusted_profit=trusted_profit,
             valuation_result=valuation.to_dict(),
             risk_flags=risk_flags,
+            numeric_mod_features=snapshot.numeric_mod_features,
+            tier_source=snapshot.tier_source,
+            native_tier_count=snapshot.native_tier_count,
+            twink_override=snapshot.twink_override,
+            low_ilvl_context=snapshot.low_ilvl_context,
+            tier_ilvl_mismatch=snapshot.tier_ilvl_mismatch,
+            fractured_low_ilvl_brick=snapshot.fractured_low_ilvl_brick,
+        )
+        opportunity.valuation_explanation = self._build_valuation_explanation(
+            opportunity
         )
         return (opportunity, normalized_item)
 
@@ -730,11 +952,39 @@ class OnDemandScanner:
             opportunity.market_spread = comparables.market_spread
             opportunity.comparables_count = comparables.comparables_count
             opportunity.pricing_position = comparables.pricing_position
+            self._apply_low_evidence_cap(opportunity)
             opportunity.score = self._apply_market_context(
                 opportunity.score,
                 normalized_item,
-                ValuationResult(**opportunity.valuation_result),
+                ValuationResult(
+                    predicted_value=float(
+                        opportunity.valuation_result.get(
+                            "predicted_value", opportunity.ml_value
+                        )
+                    ),
+                    confidence=float(
+                        opportunity.valuation_result.get(
+                            "confidence", opportunity.ml_confidence
+                        )
+                    ),
+                    item_family=str(
+                        opportunity.valuation_result.get(
+                            "item_family", opportunity.item_family
+                        )
+                    ),
+                    model_source=str(
+                        opportunity.valuation_result.get(
+                            "model_source", "family_fallback"
+                        )
+                    ),
+                    feature_completeness=float(
+                        opportunity.valuation_result.get("feature_completeness", 0.0)
+                    ),
+                ),
                 comparables,
+            )
+            opportunity.valuation_explanation = self._build_valuation_explanation(
+                opportunity
             )
             enriched.append(opportunity)
         return enriched
@@ -886,6 +1136,7 @@ class OnDemandScanner:
         filtered_open_cheap_low_confidence = 0
         filtered_open_cheap_low_profit = 0
         filtered_open_cheap_stale = 0
+        filtered_stage_a_fractured_low_ilvl_brick = 0
 
         deduped_ttl = 0
         fetch_calls = 0
@@ -907,11 +1158,31 @@ class OnDemandScanner:
                         deduped_ttl += 1
                         continue
 
-                    if self.extract_price_chaos(listing) is None:
+                    listed_price = self.extract_price_chaos(listing)
+                    if listed_price is None:
                         skipped_invalid_currency += 1
                         continue
 
-                    built = self._build_opportunity(item_json, query_id, stale_hours)
+                    price_info = listing.get("price", {})
+                    normalized_item = normalize_trade_item(
+                        item_json,
+                        listed_price=listed_price,
+                        listing_currency=price_info.get("currency", "chaos"),
+                        listing_amount=float(price_info.get("amount", 0.0) or 0.0),
+                    )
+                    if normalized_item is None:
+                        continue
+
+                    if normalized_item.fractured_low_ilvl_brick:
+                        filtered_stage_a_fractured_low_ilvl_brick += 1
+                        continue
+
+                    built = self._build_opportunity(
+                        item_json,
+                        query_id,
+                        stale_hours,
+                        normalized_item=normalized_item,
+                    )
                     if built is None:
                         continue
 
@@ -995,6 +1266,7 @@ class OnDemandScanner:
             filtered_open_cheap_low_confidence=filtered_open_cheap_low_confidence,
             filtered_open_cheap_low_profit=filtered_open_cheap_low_profit,
             filtered_open_cheap_stale=filtered_open_cheap_stale,
+            filtered_stage_a_fractured_low_ilvl_brick=filtered_stage_a_fractured_low_ilvl_brick,
             avg_profit=round(
                 sum(o.profit for o in filtered_opportunities)
                 / len(filtered_opportunities),

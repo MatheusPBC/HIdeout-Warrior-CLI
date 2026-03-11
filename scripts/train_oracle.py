@@ -27,6 +27,23 @@ class TrainingGateError(Exception):
     pass
 
 
+ILVL_BANDS: Dict[str, Tuple[Optional[int], Optional[int]]] = {
+    "low": (None, 74),
+    "mid": (75, 83),
+    "high": (84, None),
+}
+MIN_ROWS_PER_ILVL_BAND = 20
+
+
+def classify_ilvl_band(ilvl: float) -> str:
+    value = int(ilvl)
+    if value <= 74:
+        return "low"
+    if value <= 83:
+        return "mid"
+    return "high"
+
+
 def _extract_price_chaos(listing: dict, currency_rates: dict) -> Optional[float]:
     price_info = listing.get("price", {})
     currency = price_info.get("currency", "")
@@ -90,6 +107,7 @@ def parse_trade_item_to_features(
     feature_row.update(
         {
             "item_family": normalized.item_family,
+            "ilvl_band": classify_ilvl_band(normalized.ilvl),
             "base_type": normalized.base_type,
             "listed_at": normalized.listed_at,
             "price_chaos": round(normalized.listed_price, 1),
@@ -739,6 +757,8 @@ def _train_family_model(
     family: str,
     family_df: pd.DataFrame,
     output_dir: Path,
+    model_suffix: str = "",
+    report_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     if len(family_df) < 20:
         return None
@@ -793,9 +813,9 @@ def _train_family_model(
         y_test, preds, baseline_value=float(y_train.median())
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = output_dir / f"price_oracle_{family}.xgb"
+    model_path = output_dir / f"price_oracle_{family}{model_suffix}.xgb"
     model.save_model(model_path)
-    return {
+    report = {
         "family": family,
         "rows_total": int(len(family_df)),
         "rows_train": int(len(x_train)),
@@ -807,6 +827,75 @@ def _train_family_model(
         "model_path": str(model_path),
         "model_sha256": _hash_file(model_path),
     }
+    if report_context:
+        report.update(report_context)
+    return report
+
+
+def _subset_by_ilvl_band(df: pd.DataFrame, band: str) -> pd.DataFrame:
+    min_ilvl, max_ilvl = ILVL_BANDS[band]
+    subset = df
+    if min_ilvl is not None:
+        subset = subset.loc[subset["ilvl"] >= min_ilvl]
+    if max_ilvl is not None:
+        subset = subset.loc[subset["ilvl"] <= max_ilvl]
+    return subset.copy()
+
+
+def _train_family_band_models(
+    family: str,
+    family_df: pd.DataFrame,
+    output_dir: Path,
+    min_rows_per_band: int = MIN_ROWS_PER_ILVL_BAND,
+) -> List[Dict[str, Any]]:
+    if family_df.empty or "ilvl" not in family_df.columns:
+        return []
+
+    reports: List[Dict[str, Any]] = []
+    for band in ILVL_BANDS:
+        band_df = _subset_by_ilvl_band(family_df, band)
+        band_rows = int(len(band_df))
+        if band_rows < min_rows_per_band:
+            reports.append(
+                {
+                    "family": family,
+                    "ilvl_band": band,
+                    "rows_total": band_rows,
+                    "trained": False,
+                    "fallback_to_family": True,
+                    "fallback_reason": "insufficient_band_rows",
+                    "min_rows_per_band": min_rows_per_band,
+                }
+            )
+            continue
+
+        report = _train_family_model(
+            family,
+            band_df,
+            output_dir,
+            model_suffix=f"__{band}",
+            report_context={
+                "ilvl_band": band,
+                "trained": True,
+                "fallback_to_family": False,
+            },
+        )
+        if report is None:
+            reports.append(
+                {
+                    "family": family,
+                    "ilvl_band": band,
+                    "rows_total": band_rows,
+                    "trained": False,
+                    "fallback_to_family": True,
+                    "fallback_reason": "band_training_failed",
+                    "min_rows_per_band": min_rows_per_band,
+                }
+            )
+            continue
+        reports.append(report)
+
+    return reports
 
 
 def train_xgboost_oracle(
@@ -863,6 +952,11 @@ def train_xgboost_oracle(
         family_df = df.loc[df.get("item_family") == family].copy()
         report = _train_family_model(family, family_df, output_dir)
         if report is not None:
+            report["ilvl_band_models"] = _train_family_band_models(
+                family,
+                family_df,
+                output_dir,
+            )
             trained_reports.append(report)
 
     if not trained_reports:

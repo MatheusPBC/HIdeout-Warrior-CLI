@@ -104,6 +104,11 @@ def _render_scan_table(results, full=False, title=""):
                 "Discount",
                 lambda v: f"{float(v):.2f}x" if v is not None else "N/A",
             ),
+            (
+                "valuation_explanation",
+                "Why",
+                lambda v: str(v) if v else "N/A",
+            ),
         ]
         for key, label, formatter in candidate_columns:
             if key in results[0]:
@@ -460,7 +465,9 @@ def craft_path(
 @app.command()
 def scan(
     item_type: str = typer.Option(
-        "", "--type", help="Nome base do item; sem --type o scan aberto prioriza confiança"
+        "",
+        "--type",
+        help="Nome base do item; sem --type o scan aberto prioriza confiança",
     ),
     ilvl: int = typer.Option(1, help="Item Level mínimo"),
     rarity: str = typer.Option(
@@ -662,5 +669,3 @@ def rog_assist():
 
 if __name__ == "__main__":
     app()
-
-
