@@ -1,0 +1,12 @@
+# CHANGELOG
+
+## 2026-03-10
+
+- Adicionado o filtro `--min-listed-price` nos comandos `scan` e `flip-plan`, com propagação para o scanner/planner e aplicação no fluxo de seleção de oportunidades.
+- Incluídas novas métricas/KPIs relacionadas ao filtro de preço mínimo listado, incluindo contadores de itens filtrados (`filtered_min_listed_price`) e exibição no resumo/CLI.
+- Endurecido o treino em `scripts/train_oracle.py` com melhorias anti-data-leakage: auditoria de duplicatas e overlap train/test, split temporal quando timestamp é confiável, e fallback controlado para split aleatório.
+- Expandida a avaliação do treino com métricas adicionais: `MAE`, baseline por mediana de treino, `RMSE` de baseline e `RMSE` por buckets de preço.
+- Aumentada a robustez em `core/ml_oracle.py` com resolução de path de modelo mais resiliente e consolidação de schema único de features para treino/inferência.
+- Ajustado o score/risco em `core/market_scanner.py` com nova flag `high_ticket_low_confidence`, penalidades explícitas no score e comportamento `safe_buy` dinâmico por faixa de preço/confiança.
+- Adicionados/atualizados testes em `tests/test_train_oracle.py`, `tests/test_ml_oracle.py` e `tests/test_market_scanner.py` para cobrir split temporal, métricas por bucket, schema de features, flags de risco, penalidades e filtro de preço mínimo.
+- Validação de testes executados com `pytest -q` neste fluxo: **41 passed, 11 warnings, 0 falhas**.
