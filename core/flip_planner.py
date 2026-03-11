@@ -64,82 +64,47 @@ class CraftPlan:
 class FlipAdvisor:
     """Planner econômico de flips guiado por heurística."""
 
-    _BASE_PROFILES: List[Tuple[str, Dict[str, object]]] = [
-        (
-            "Wand",
-            {
-                "label": "Caster Wand Flip",
-                "goal_mods": ["SpellDamage1", "CastSpeed1", "CritChanceSpells1"],
-                "premium": 180.0,
-                "rationale": "Wands caster costumam monetizar spell damage, cast speed e crit em conjunto.",
-            },
-        ),
-        (
-            "Body Armour",
-            {
-                "label": "Defensive Armour Flip",
-                "goal_mods": ["Life1", "SpellSuppress1", "Resist1"],
-                "premium": 220.0,
-                "rationale": "Body armours valorizam muito quando fecham vida, suppress e resistência utilizável.",
-            },
-        ),
-        (
-            "Garb",
-            {
-                "label": "Evasion Armour Flip",
-                "goal_mods": ["Life1", "SpellSuppress1", "Resist1"],
-                "premium": 200.0,
-                "rationale": "Bases evasivas convertem bem upgrades defensivos em margem de revenda.",
-            },
-        ),
-        (
-            "Regalia",
-            {
-                "label": "Caster Chest Flip",
-                "goal_mods": ["Life1", "Resist1"],
-                "premium": 140.0,
-                "rationale": "Bases caster premium pagam por defesas limpas e suffixes úteis.",
-            },
-        ),
-    ]
+    _FAMILY_PROFILES: Dict[str, Dict[str, object]] = {
+        "wand_caster": {
+            "label": "Caster Wand Flip",
+            "goal_mods": ["SpellDamage1", "CastSpeed1", "CritChanceSpells1"],
+            "premium": 190.0,
+            "rationale": "Wands caster monetizam bem spell damage, cast speed e crit quando a base entra abaixo do mercado.",
+        },
+        "body_armour_defense": {
+            "label": "Defensive Armour Flip",
+            "goal_mods": ["Life1", "SpellSuppress1", "Resist1"],
+            "premium": 210.0,
+            "rationale": "Body armours com vida, suppress e resist tendem a vender perto da mediana alta do mercado.",
+        },
+        "jewel_cluster": {
+            "label": "Jewel Utility Flip",
+            "goal_mods": ["Life1", "CritChanceSpells1"],
+            "premium": 120.0,
+            "rationale": "Jewels e clusters com pares de mods vendáveis convertem bem upgrades pequenos em margem.",
+        },
+        "accessory_generic": {
+            "label": "Accessory Fix-Up Flip",
+            "goal_mods": ["Life1", "Resist1", "Attributes1"],
+            "premium": 130.0,
+            "rationale": "Accessories melhoram muito quando fecham vida, resist e um terceiro atributo útil.",
+        },
+        "generic": {
+            "label": "Generic Utility Flip",
+            "goal_mods": ["Life1", "Resist1"],
+            "premium": 90.0,
+            "rationale": "Quando a base não encaixa num archetype claro, priorizamos upgrades genéricos e vendáveis.",
+        },
+    }
 
     _ACTION_CATALOG = {
-        "SpellDamage1": (
-            "Essence spam",
-            35.0,
-            0.42,
-            "Força spell damage de forma relativamente controlada.",
-        ),
-        "CastSpeed1": (
-            "Harvest Reforge Speed",
-            20.0,
-            0.32,
-            "Busca cast speed com um custo estável para flip de wand.",
-        ),
-        "CritChanceSpells1": (
-            "Bench craft crit",
-            8.0,
-            1.0,
-            "Fechamento barato quando sobra espaço útil.",
-        ),
-        "Life1": (
-            "Essence of Greed",
-            18.0,
-            0.48,
-            "Vida é o upgrade mais vendável para flips generalistas.",
-        ),
-        "SpellSuppress1": (
-            "Harvest Reforge Defence",
-            24.0,
-            0.26,
-            "Tenta consolidar suppress/defence em bases elegíveis.",
-        ),
-        "Resist1": (
-            "Bench craft resistance",
-            4.0,
-            1.0,
-            "Ajuste barato para fechar venda e viabilizar lucro.",
-        ),
+        "SpellDamage1": ("Essence spam", 35.0, 0.42, "Força spell damage de forma relativamente controlada."),
+        "CastSpeed1": ("Harvest Reforge Speed", 20.0, 0.32, "Busca cast speed com um custo estável para flip de wand."),
+        "CritChanceSpells1": ("Bench craft crit", 8.0, 1.0, "Fechamento barato quando sobra espaço útil."),
+        "Life1": ("Essence of Greed", 18.0, 0.48, "Vida é o upgrade mais vendável para flips generalistas."),
+        "SpellSuppress1": ("Harvest Reforge Defence", 24.0, 0.26, "Tenta consolidar suppress/defence em bases elegíveis."),
+        "Resist1": ("Bench craft resistance", 4.0, 1.0, "Ajuste barato para fechar venda e viabilizar lucro."),
+        "Attributes1": ("Bench craft attribute", 4.0, 1.0, "Ajuste barato para melhorar a liquidez do accessory."),
     }
 
     def __init__(self, league: str = "auto"):
@@ -180,7 +145,9 @@ class FlipAdvisor:
     ) -> List[CraftPlan]:
         plans: List[CraftPlan] = []
         ranked = sorted(
-            opportunities, key=lambda opp: (opp.score, opp.profit), reverse=True
+            opportunities,
+            key=lambda opp: (opp.score, opp.trusted_profit, opp.profit),
+            reverse=True,
         )
 
         for opportunity in ranked[:10]:
@@ -188,9 +155,7 @@ class FlipAdvisor:
             if plan is not None:
                 plans.append(plan)
 
-        plans.sort(
-            key=lambda plan: (plan.expected_profit, plan.plan_confidence), reverse=True
-        )
+        plans.sort(key=lambda plan: (plan.expected_profit, plan.plan_confidence), reverse=True)
 
         for index, plan in enumerate(plans):
             alternatives = []
@@ -202,11 +167,9 @@ class FlipAdvisor:
 
         return plans
 
-    def _build_plan(
-        self, opportunity: ScanOpportunity, budget: float
-    ) -> CraftPlan | None:
+    def _build_plan(self, opportunity: ScanOpportunity, budget: float) -> CraftPlan | None:
         target = self._recommend_target(opportunity)
-        current_mods = set(self._extract_mod_tokens(opportunity))
+        current_mods = set(opportunity.mod_tokens)
         missing_mods = [mod for mod in target.goal_mods if mod not in current_mods]
         steps = self._build_steps(opportunity, target, missing_mods)
 
@@ -215,19 +178,19 @@ class FlipAdvisor:
             return None
 
         expected_sale_value = target.expected_value
-        expected_profit = round(
-            expected_sale_value - opportunity.listed_price - expected_craft_cost, 1
-        )
+        expected_profit = round(expected_sale_value - opportunity.listed_price - expected_craft_cost, 1)
         if expected_profit <= 0:
             return None
 
+        market_confidence = 0.1 if opportunity.pricing_position == "below_floor" else 0.0
         plan_confidence = max(
             0.25,
             min(
                 0.95,
-                (opportunity.ml_confidence * 0.7)
+                (opportunity.ml_confidence * 0.65)
                 + (target.confidence * 0.2)
-                + (self._step_confidence(steps) * 0.1),
+                + (self._step_confidence(steps) * 0.1)
+                + market_confidence,
             ),
         )
 
@@ -238,6 +201,8 @@ class FlipAdvisor:
             risk_notes.append("near_budget_limit")
         if len(steps) >= 4:
             risk_notes.append("multi_step_execution")
+        if opportunity.pricing_position == "outlier":
+            risk_notes.append("weak_market_position")
 
         return CraftPlan(
             opportunity=opportunity,
@@ -252,65 +217,42 @@ class FlipAdvisor:
             risk_notes=risk_notes,
         )
 
-    def _recommend_target(
-        self, opportunity: ScanOpportunity
-    ) -> FlipTargetRecommendation:
-        profile = None
-        for token, candidate in self._BASE_PROFILES:
-            if token.lower() in opportunity.base_type.lower():
-                profile = candidate
-                break
+    def _recommend_target(self, opportunity: ScanOpportunity) -> FlipTargetRecommendation:
+        profile = self._FAMILY_PROFILES.get(opportunity.item_family, self._FAMILY_PROFILES["generic"])
+        missing_count = sum(1 for mod in profile["goal_mods"] if mod not in opportunity.mod_tokens)
 
-        if profile is None:
-            profile = {
-                "label": "Generic Utility Flip",
-                "goal_mods": ["Life1", "Resist1"],
-                "premium": 90.0,
-                "rationale": "Quando a base não encaixa num archetype claro, priorizamos upgrades genéricos e vendáveis.",
-            }
-
-        missing_count = sum(
-            1
-            for mod in profile["goal_mods"]
-            if mod not in self._extract_mod_tokens(opportunity)
-        )
+        valuation_value = opportunity.valuation_result.get("predicted_value", opportunity.ml_value)
+        market_anchor = max(opportunity.market_median, opportunity.market_floor)
         expected_value = round(
             max(
-                opportunity.ml_value + float(profile["premium"]),
+                valuation_value + float(profile["premium"]),
+                market_anchor + (missing_count * 28.0),
                 opportunity.listed_price + 35.0 + (missing_count * 25.0),
             ),
             1,
         )
         confidence = max(
-            0.4, min(0.9, opportunity.ml_confidence + 0.1 - (missing_count * 0.05))
+            0.4,
+            min(
+                0.92,
+                opportunity.ml_confidence
+                + (0.08 if opportunity.pricing_position == "below_floor" else 0.0)
+                + (0.04 if opportunity.comparables_count >= 3 else -0.03)
+                - (missing_count * 0.05),
+            ),
         )
+
+        rationale = str(profile["rationale"])
+        if opportunity.market_median > 0:
+            rationale += f" Mediana local observada: {opportunity.market_median:.1f}c."
 
         return FlipTargetRecommendation(
             label=str(profile["label"]),
             goal_mods=list(profile["goal_mods"]),
             expected_value=expected_value,
             confidence=round(confidence, 2),
-            rationale=str(profile["rationale"]),
+            rationale=rationale,
         )
-
-    def _extract_mod_tokens(self, opportunity: ScanOpportunity) -> List[str]:
-        text = " ".join(opportunity.explicit_mods + opportunity.implicit_mods).lower()
-        tokens: List[str] = []
-
-        if "spell" in text and "damage" in text:
-            tokens.append("SpellDamage1")
-        if "cast speed" in text or "casting speed" in text:
-            tokens.append("CastSpeed1")
-        if "critical" in text and "spell" in text:
-            tokens.append("CritChanceSpells1")
-        if "life" in text:
-            tokens.append("Life1")
-        if "suppress" in text:
-            tokens.append("SpellSuppress1")
-        if "resist" in text or "resistance" in text:
-            tokens.append("Resist1")
-
-        return tokens
 
     def _build_steps(
         self,
@@ -321,26 +263,17 @@ class FlipAdvisor:
         steps: List[CraftStep] = []
         premium_total = max(target.expected_value - opportunity.ml_value, 0.0)
         cumulative_share = 0.0
-
         selected_mods = missing_mods[:3] if missing_mods else target.goal_mods[:2]
 
-        for index, mod in enumerate(selected_mods, start=1):
+        for mod in selected_mods:
             action_name, cost, probability, notes = self._ACTION_CATALOG.get(
                 mod,
-                (
-                    "Bench stabilization",
-                    6.0,
-                    1.0,
-                    "Fechamento conservador para preservar margem.",
-                ),
+                ("Bench stabilization", 6.0, 1.0, "Fechamento conservador para preservar margem."),
             )
             incremental_value = premium_total / max(len(selected_mods), 1)
             cumulative_share += incremental_value
-            expected_value_after_step = round(
-                opportunity.ml_value + cumulative_share, 1
-            )
+            expected_value_after_step = round(opportunity.ml_value + cumulative_share, 1)
             expected_cost = round(cost / max(probability, 0.05), 1)
-
             steps.append(
                 CraftStep(
                     action_name=action_name,
@@ -353,25 +286,18 @@ class FlipAdvisor:
                 )
             )
 
-        repair_step = self._repair_step(opportunity, target)
+        repair_step = self._repair_step(opportunity)
         if repair_step is not None:
             steps.insert(0, repair_step)
 
         self._mark_stop_point(opportunity, steps)
         return steps
 
-    def _repair_step(
-        self,
-        opportunity: ScanOpportunity,
-        target: FlipTargetRecommendation,
-    ) -> CraftStep | None:
+    def _repair_step(self, opportunity: ScanOpportunity) -> CraftStep | None:
         if not opportunity.risk_flags:
             return None
 
-        if (
-            "fractured" in opportunity.risk_flags
-            or "influenced" in opportunity.risk_flags
-        ):
+        if "fractured" in opportunity.risk_flags or "influenced" in opportunity.risk_flags:
             return CraftStep(
                 action_name="Annul / repair simple",
                 target_mod="cleanup",
@@ -381,23 +307,16 @@ class FlipAdvisor:
                 expected_value_after_step=round(opportunity.ml_value + 20.0, 1),
                 notes="Passo defensivo para limpar ou estabilizar a base antes de investir pesado.",
             )
-
         return None
 
-    def _mark_stop_point(
-        self, opportunity: ScanOpportunity, steps: List[CraftStep]
-    ) -> None:
+    def _mark_stop_point(self, opportunity: ScanOpportunity, steps: List[CraftStep]) -> None:
         if not steps:
             return
 
         cumulative_cost = 0.0
         for step in steps:
             cumulative_cost += step.expected_cost
-            interim_profit = (
-                step.expected_value_after_step
-                - opportunity.listed_price
-                - cumulative_cost
-            )
+            interim_profit = step.expected_value_after_step - opportunity.listed_price - cumulative_cost
             if interim_profit > 0:
                 step.stop_here = True
                 break
@@ -411,17 +330,12 @@ class FlipAdvisor:
         cumulative_cost = 0.0
         for step in steps:
             cumulative_cost += step.expected_cost
-            interim_profit = (
-                step.expected_value_after_step
-                - opportunity.listed_price
-                - cumulative_cost
-            )
+            interim_profit = step.expected_value_after_step - opportunity.listed_price - cumulative_cost
             if step.stop_here or interim_profit >= (expected_profit * 0.65):
                 return (
                     f"Pare e venda se após '{step.action_name}' o valor implícito atingir "
                     f"{step.expected_value_after_step:.1f}c com lucro >= {max(interim_profit, 0):.1f}c."
                 )
-
         return "Siga até o alvo recomendado; não há stop-and-sell antecipado claramente superior."
 
     def _step_confidence(self, steps: List[CraftStep]) -> float:

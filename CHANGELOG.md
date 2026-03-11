@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-03-11
+
+- Adicionada a camada compartilhada `NormalizedMarketItem` em `core/item_normalizer.py` para unificar a normalização usada por scanner, valuation, treino e planner.
+- Segmentado o valuation por família em `core/ml_oracle.py`, com `ValuationResult` estruturado, roteamento por `wand_caster`, `body_armour_defense`, `jewel_cluster`, `accessory_generic` e fallback `generic`.
+- Enriquecido o scanner em `core/market_scanner.py` com contexto de mercado (`market_floor`, `market_median`, `comparables_count`, `market_spread`, `pricing_position`) e serialização desses campos em `ScanOpportunity`.
+- Adaptado o `flip-plan` em `core/flip_planner.py` para consumir `item_family`, `valuation_result` e sinais de mercado na escolha de alvo e ordenação dos planos.
+- Reestruturado `scripts/train_oracle.py` para treinar artefatos por família usando a mesma normalização do scanner e com seleção explícita do schema de features de cada família.
+- Corrigida a inferência dos modelos treinados em `core/ml_oracle.py`, alinhando as colunas do `DMatrix` com o schema esperado pelo booster e evitando queda indevida para `family_fallback`.
+- Identificado na validação real da liga `Mirage` que várias bases usadas no treino estão concentradas em listings de `1c` a `2c`, o que limita a qualidade econômica dos modelos mesmo com o pipeline corrigido.
+- Adicionados testes para normalização compartilhada e atualizados os testes de scanner, valuation e planner para cobrir contratos e comportamento por família.
+- Validação executada neste ciclo: `pytest -q` com **36 passed** e `python -m compileall cli.py core scripts tests` sem erros.
+
 ## 2026-03-10
 
 - Adicionado o filtro `--min-listed-price` nos comandos `scan` e `flip-plan`, com propagação para o scanner/planner e aplicação no fluxo de seleção de oportunidades.

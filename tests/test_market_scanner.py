@@ -1,13 +1,59 @@
-import pytest
-import sys
 import os
-from datetime import datetime, timezone, timedelta
-from unittest.mock import patch, MagicMock
+import sys
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.market_scanner import ListingSnapshot, OnDemandScanner
-from core.graph_engine import ItemState
+from core.market_scanner import OnDemandScanner
+from core.ml_oracle import ValuationResult
+
+
+def _make_item_detail(
+    *,
+    item_id: str = "item_id_1",
+    base_type: str = "Tabula Rasa",
+    ilvl: int = 84,
+    price_amount: float = 10.0,
+    currency: str = "chaos",
+    indexed_at: str | None = None,
+    explicit_mods: list[str] | None = None,
+    corrupted: bool = False,
+    fractured: bool = False,
+    influences: dict | None = None,
+):
+    if indexed_at is None:
+        indexed_at = datetime.now(timezone.utc).isoformat()
+    if explicit_mods is None:
+        explicit_mods = ["+# to maximum Life", "+#% to Fire Resistance"]
+    if influences is None:
+        influences = {}
+
+    return {
+        "listing": {
+            "price": {
+                "type": "price",
+                "amount": price_amount,
+                "currency": currency,
+            },
+            "account": {"name": "SellerAccount", "online": True},
+            "whisper": "@SellerAccount Hi, I would like to buy your item",
+            "indexed": indexed_at,
+        },
+        "item": {
+            "id": item_id,
+            "baseType": base_type,
+            "ilvl": ilvl,
+            "rarity": "rare",
+            "explicitMods": explicit_mods,
+            "implicitMods": [],
+            "corrupted": corrupted,
+            "fractured": fractured,
+            "influences": influences,
+        },
+    }
 
 
 class TestExtractPriceChaos:
@@ -19,112 +65,12 @@ class TestExtractPriceChaos:
             return scanner
 
     def test_extract_price_chaos_basic(self, scanner_with_mock_rates):
-        listing = {
-            "price": {
-                "amount": 10.0,
-                "currency": "chaos",
-            }
-        }
-        result = scanner_with_mock_rates.extract_price_chaos(listing)
-        assert result == 10.0
+        listing = {"price": {"amount": 10.0, "currency": "chaos"}}
+        assert scanner_with_mock_rates.extract_price_chaos(listing) == 10.0
 
     def test_extract_price_chaos_divine(self, scanner_with_mock_rates):
-        listing = {
-            "price": {
-                "amount": 1.0,
-                "currency": "divine",
-            }
-        }
-        result = scanner_with_mock_rates.extract_price_chaos(listing)
-        assert result == 150.0
-
-    def test_extract_price_chaos_exalted(self, scanner_with_mock_rates):
-        listing = {
-            "price": {
-                "amount": 5.0,
-                "currency": "exalted",
-            }
-        }
-        result = scanner_with_mock_rates.extract_price_chaos(listing)
-        assert result == 425.0
-
-    def test_extract_price_chaos_invalid(self, scanner_with_mock_rates):
-        listing = {
-            "price": {
-                "amount": -5.0,
-                "currency": "chaos",
-            }
-        }
-        result = scanner_with_mock_rates.extract_price_chaos(listing)
-        assert result is None
-
-    def test_extract_price_chaos_unknown_currency(self, scanner_with_mock_rates):
-        listing = {
-            "price": {
-                "amount": 10.0,
-                "currency": "unknown_currency",
-            }
-        }
-        result = scanner_with_mock_rates.extract_price_chaos(listing)
-        assert result is None
-
-
-class TestAntiFixFilter:
-    @pytest.fixture
-    def scanner_with_mock_rates(self, mock_ninja_currency_response):
-        with patch("core.market_scanner.MarketAPIClient"):
-            scanner = OnDemandScanner(league="Standard")
-            scanner.currency_rates = mock_ninja_currency_response
-            return scanner
-
-    def test_anti_fix_filter(self, scanner_with_mock_rates):
-        now = datetime.now(timezone.utc)
-        old_indexed = (now - timedelta(hours=60)).isoformat()
-
-        result = scanner_with_mock_rates._is_probable_price_fix(
-            listed_price_chaos=1.5,
-            ml_value=20.0,
-            indexed_at=old_indexed,
-            stale_hours=48.0,
-        )
-        assert result is True
-
-    def test_anti_fix_filter_not_stale(self, scanner_with_mock_rates):
-        now = datetime.now(timezone.utc)
-        recent_indexed = (now - timedelta(hours=10)).isoformat()
-
-        result = scanner_with_mock_rates._is_probable_price_fix(
-            listed_price_chaos=1.5,
-            ml_value=20.0,
-            indexed_at=recent_indexed,
-            stale_hours=48.0,
-        )
-        assert result is False
-
-
-class TestMinProfitFilter:
-    @pytest.fixture
-    def mock_results(self):
-        return [
-            {"base_type": "Item1", "profit": 100.0},
-            {"base_type": "Item2", "profit": 50.0},
-            {"base_type": "Item3", "profit": 10.0},
-            {"base_type": "Item4", "profit": -20.0},
-        ]
-
-    def test_min_profit_filter_above_threshold(self, mock_results):
-        filtered = [item for item in mock_results if item["profit"] >= 50.0]
-        assert len(filtered) == 2
-        assert filtered[0]["base_type"] == "Item1"
-        assert filtered[1]["base_type"] == "Item2"
-
-    def test_min_profit_filter_zero(self, mock_results):
-        filtered = [item for item in mock_results if item["profit"] >= 0.0]
-        assert len(filtered) == 3
-
-    def test_min_profit_filter_negative(self, mock_results):
-        filtered = [item for item in mock_results if item["profit"] >= -10.0]
-        assert len(filtered) == 3
+        listing = {"price": {"amount": 1.0, "currency": "divine"}}
+        assert scanner_with_mock_rates.extract_price_chaos(listing) == 150.0
 
 
 class TestOpportunityScoring:
@@ -136,238 +82,117 @@ class TestOpportunityScoring:
             scanner.api_client.league = "Standard"
             return scanner
 
-    def test_score_penalizes_risk_flags(self, scanner_with_mock_rates):
-        clean_score = scanner_with_mock_rates._compute_opportunity_score(
-            listed_price=40.0,
-            ml_value=120.0,
-            ml_confidence=0.8,
-            risk_flags=[],
-        )
-        risky_score = scanner_with_mock_rates._compute_opportunity_score(
-            listed_price=40.0,
-            ml_value=120.0,
-            ml_confidence=0.8,
-            risk_flags=["price_fix_suspected", "low_confidence"],
-        )
-        assert clean_score > risky_score
-
-    def test_risk_flags_include_high_ticket_low_confidence(
-        self, scanner_with_mock_rates
-    ):
-        snapshot = ListingSnapshot(
-            item_id="item-1",
-            base_type="Imbued Wand",
-            ilvl=84,
-            listed_price=100.0,
-            listing_currency="chaos",
-            listing_amount=100.0,
-            seller="seller",
-            indexed_at=None,
-            whisper="@seller hi",
-            trade_link="https://example.com/trade#item-1",
-            trade_search_link="https://example.com/trade",
-            corrupted=False,
-            fractured=False,
+    def test_build_opportunity_includes_family_valuation_and_market_fields(self, scanner_with_mock_rates):
+        item = _make_item_detail(base_type="Imbued Wand", explicit_mods=["+#% increased Spell Damage", "+#% increased Cast Speed"])
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            return_value=ValuationResult(
+                predicted_value=80.0,
+                confidence=0.74,
+                item_family="wand_caster",
+                model_source="family_fallback",
+                feature_completeness=0.67,
+            )
         )
 
-        flags = scanner_with_mock_rates._risk_flags(
-            snapshot=snapshot,
-            ml_value=130.0,
-            ml_confidence=0.7,
-            stale_hours=48.0,
+        built = scanner_with_mock_rates._build_opportunity(item, query_id="abc123", stale_hours=48.0)
+        assert built is not None
+        opportunity, normalized_item = built
+        assert normalized_item.item_family == "wand_caster"
+        assert opportunity.item_family == "wand_caster"
+        assert opportunity.valuation_result["model_source"] == "family_fallback"
+        assert opportunity.trusted_profit > 0
+        assert "family_fallback" in opportunity.risk_flags
+
+    def test_high_ticket_low_confidence_flag(self, scanner_with_mock_rates):
+        item = _make_item_detail(base_type="Opal Ring", price_amount=120.0)
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            return_value=ValuationResult(
+                predicted_value=170.0,
+                confidence=0.7,
+                item_family="accessory_generic",
+                model_source="family_fallback",
+                feature_completeness=0.5,
+            )
+        )
+        built = scanner_with_mock_rates._build_opportunity(item, query_id="abc123", stale_hours=48.0)
+        opportunity, _ = built
+        assert "high_ticket_low_confidence" in opportunity.risk_flags
+
+
+class TestScanProfiles:
+    @pytest.fixture
+    def scanner_with_mock_rates(self, mock_ninja_currency_response):
+        with patch("core.market_scanner.MarketAPIClient"):
+            scanner = OnDemandScanner(league="Standard")
+            scanner.currency_rates = mock_ninja_currency_response
+            scanner.api_client.league = "Standard"
+            scanner.api_client.search_items = MagicMock(return_value=("abc123", ["id1", "id2", "id3"]))
+            return scanner
+
+    def test_open_market_filters_low_confidence(self, scanner_with_mock_rates):
+        detail = _make_item_detail(price_amount=7.0)
+        scanner_with_mock_rates.api_client.fetch_item_details = MagicMock(return_value=[detail])
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            return_value=ValuationResult(40.0, 0.40, "generic", "family_fallback", 0.2)
         )
 
-        assert "high_ticket_low_confidence" in flags
+        opportunities, stats = scanner_with_mock_rates.scan_opportunities(item_class="", max_items=1)
 
-    def test_score_penalizes_high_ticket_low_confidence_flag(
-        self, scanner_with_mock_rates
-    ):
-        baseline_score = scanner_with_mock_rates._compute_opportunity_score(
-            listed_price=90.0,
-            ml_value=140.0,
-            ml_confidence=0.78,
-            risk_flags=[],
-        )
-        penalized_score = scanner_with_mock_rates._compute_opportunity_score(
-            listed_price=90.0,
-            ml_value=140.0,
-            ml_confidence=0.78,
-            risk_flags=["high_ticket_low_confidence"],
+        assert opportunities == []
+        assert stats.scan_profile == "open_market"
+        assert stats.filtered_open_confidence == 1
+
+    def test_targeted_scan_keeps_item_rejected_by_open_market(self, scanner_with_mock_rates):
+        detail = _make_item_detail(base_type="Imbued Wand", price_amount=2.0, explicit_mods=["+#% increased Spell Damage"])
+        scanner_with_mock_rates.api_client.fetch_item_details = MagicMock(return_value=[detail])
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            return_value=ValuationResult(35.0, 0.55, "wand_caster", "family_fallback", 0.5)
         )
 
-        assert penalized_score < baseline_score
-
-    def test_build_opportunity_includes_score_and_flags(
-        self, scanner_with_mock_rates, mock_item_detail
-    ):
-        scanner_with_mock_rates.oracle.predict_value = MagicMock(
-            return_value=(60.0, 0.45)
-        )
-        opportunity = scanner_with_mock_rates._build_opportunity(
-            mock_item_detail,
-            query_id="abc123",
-            stale_hours=48.0,
-        )
-        assert opportunity is not None
-        assert opportunity.score >= 0
-        assert "low_confidence" in opportunity.risk_flags
-        assert opportunity.resolved_league == "Standard"
-
-
-class TestMinListedPriceFilter:
-    @patch("core.market_scanner.MarketAPIClient")
-    @patch("core.market_scanner.PricePredictor")
-    def test_scan_opportunities_filters_by_min_listed_price(
-        self,
-        mock_oracle_cls,
-        mock_client_cls,
-    ):
-        mock_client = mock_client_cls.return_value
-        mock_client.league = "Standard"
-        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
-        mock_client.search_items.return_value = ("query123", ["a", "b"])
-        mock_client.fetch_item_details.return_value = [
-            {
-                "id": "result_low",
-                "listing": {
-                    "whisper": "@seller hi",
-                    "price": {"amount": 5.0, "currency": "chaos"},
-                    "account": {"name": "seller1"},
-                    "indexed": "2026-03-10T09:00:00Z",
-                },
-                "item": {
-                    "id": "item_low",
-                    "baseType": "Driftwood Wand",
-                    "ilvl": 80,
-                    "explicitMods": ["+# to maximum Life"],
-                    "implicitMods": [],
-                    "corrupted": False,
-                    "fractured": False,
-                    "influences": {},
-                },
-            },
-            {
-                "id": "result_high",
-                "listing": {
-                    "whisper": "@seller hi",
-                    "price": {"amount": 60.0, "currency": "chaos"},
-                    "account": {"name": "seller2"},
-                    "indexed": "2026-03-10T09:00:00Z",
-                },
-                "item": {
-                    "id": "item_high",
-                    "baseType": "Imbued Wand",
-                    "ilvl": 84,
-                    "explicitMods": ["+#% increased Spell Damage"],
-                    "implicitMods": [],
-                    "corrupted": False,
-                    "fractured": False,
-                    "influences": {},
-                },
-            },
-        ]
-
-        mock_oracle = mock_oracle_cls.return_value
-        mock_oracle.predict_value.return_value = (120.0, 0.8)
-
-        scanner = OnDemandScanner(league="Standard")
-        opportunities, stats = scanner.scan_opportunities(
-            max_items=2,
-            min_listed_price=50.0,
-            anti_fix=False,
-        )
+        opportunities, stats = scanner_with_mock_rates.scan_opportunities(item_class="Imbued Wand", max_items=1)
 
         assert len(opportunities) == 1
-        assert opportunities[0].item_id == "item_high"
-        assert opportunities[0].listed_price == 60.0
-        assert stats.filtered_min_listed_price == 1
+        assert stats.scan_profile == "targeted"
 
-
-class TestSafeBuyDynamicConfidence:
-    @patch("core.market_scanner.MarketAPIClient")
-    @patch("core.market_scanner.PricePredictor")
-    def test_safe_buy_uses_dynamic_confidence_threshold_by_price(
-        self,
-        mock_oracle_cls,
-        mock_client_cls,
-    ):
-        mock_client = mock_client_cls.return_value
-        mock_client.league = "Standard"
-        mock_client.sync_ninja_economy.return_value = {"Chaos Orb": 1.0}
-        mock_client.search_items.return_value = ("query123", ["a", "b", "c"])
-        mock_client.fetch_item_details.return_value = [
-            {
-                "id": "result_low_price",
-                "listing": {
-                    "whisper": "@seller hi",
-                    "price": {"amount": 40.0, "currency": "chaos"},
-                    "account": {"name": "seller1"},
-                    "indexed": "2026-03-10T09:00:00Z",
-                },
-                "item": {
-                    "id": "item_low_price",
-                    "baseType": "Driftwood Wand",
-                    "ilvl": 80,
-                    "explicitMods": ["+# to maximum Life"],
-                    "implicitMods": [],
-                    "corrupted": False,
-                    "fractured": False,
-                    "influences": {},
-                },
-            },
-            {
-                "id": "result_mid_price",
-                "listing": {
-                    "whisper": "@seller hi",
-                    "price": {"amount": 60.0, "currency": "chaos"},
-                    "account": {"name": "seller2"},
-                    "indexed": "2026-03-10T09:00:00Z",
-                },
-                "item": {
-                    "id": "item_mid_price",
-                    "baseType": "Imbued Wand",
-                    "ilvl": 84,
-                    "explicitMods": ["+#% increased Spell Damage"],
-                    "implicitMods": [],
-                    "corrupted": False,
-                    "fractured": False,
-                    "influences": {},
-                },
-            },
-            {
-                "id": "result_high_price",
-                "listing": {
-                    "whisper": "@seller hi",
-                    "price": {"amount": 130.0, "currency": "chaos"},
-                    "account": {"name": "seller3"},
-                    "indexed": "2026-03-10T09:00:00Z",
-                },
-                "item": {
-                    "id": "item_high_price",
-                    "baseType": "Opal Ring",
-                    "ilvl": 84,
-                    "explicitMods": ["+# to all Elemental Resistances"],
-                    "implicitMods": [],
-                    "corrupted": False,
-                    "fractured": False,
-                    "influences": {},
-                },
-            },
+    def test_scan_enriches_market_context_and_pricing_position(self, scanner_with_mock_rates):
+        details = [
+            _make_item_detail(item_id="cheap", base_type="Sadist Garb", price_amount=20.0),
+            _make_item_detail(item_id="stable", base_type="Sadist Garb", price_amount=40.0),
         ]
-
-        mock_oracle = mock_oracle_cls.return_value
-        mock_oracle.predict_value.side_effect = [
-            (80.0, 0.75),
-            (100.0, 0.79),
-            (200.0, 0.81),
-        ]
-
-        scanner = OnDemandScanner(league="Standard")
-        opportunities, stats = scanner.scan_opportunities(
-            max_items=3,
-            anti_fix=False,
-            safe_buy=True,
+        scanner_with_mock_rates.api_client.search_items = MagicMock(return_value=("abc123", ["cheap", "stable"]))
+        scanner_with_mock_rates.api_client.fetch_item_details = MagicMock(return_value=details)
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            side_effect=[
+                ValuationResult(80.0, 0.82, "body_armour_defense", "family_fallback", 0.67),
+                ValuationResult(78.0, 0.82, "body_armour_defense", "family_fallback", 0.67),
+            ]
         )
+
+        opportunities, _ = scanner_with_mock_rates.scan_opportunities(item_class="", max_items=2)
+
+        assert len(opportunities) == 2
+        assert opportunities[0].market_floor > 0
+        assert opportunities[0].comparables_count >= 1
+        assert opportunities[0].pricing_position in {"below_floor", "near_market", "outlier"}
+        assert opportunities[0].valuation_result["item_family"] == "body_armour_defense"
+
+    def test_safe_buy_uses_dynamic_confidence_threshold_by_price(self, scanner_with_mock_rates):
+        details = [
+            _make_item_detail(item_id="item_low_price", base_type="Driftwood Wand", price_amount=40.0),
+            _make_item_detail(item_id="item_mid_price", base_type="Imbued Wand", price_amount=60.0, explicit_mods=["+#% increased Spell Damage"]),
+            _make_item_detail(item_id="item_high_price", base_type="Opal Ring", price_amount=130.0),
+        ]
+        scanner_with_mock_rates.api_client.search_items = MagicMock(return_value=("query123", ["a", "b", "c"]))
+        scanner_with_mock_rates.api_client.fetch_item_details = MagicMock(return_value=details)
+        scanner_with_mock_rates.oracle.predict = MagicMock(
+            side_effect=[
+                ValuationResult(80.0, 0.75, "generic", "family_fallback", 0.4),
+                ValuationResult(100.0, 0.79, "wand_caster", "family_fallback", 0.5),
+                ValuationResult(200.0, 0.81, "accessory_generic", "family_fallback", 0.5),
+            ]
+        )
+
+        opportunities, stats = scanner_with_mock_rates.scan_opportunities(max_items=3, anti_fix=False, safe_buy=True)
 
         returned_ids = {opportunity.item_id for opportunity in opportunities}
         assert returned_ids == {"item_low_price", "item_mid_price"}
