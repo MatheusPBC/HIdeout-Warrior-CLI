@@ -1,207 +1,289 @@
+from __future__ import annotations
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Set, Tuple, TYPE_CHECKING
+from typing import Dict, Iterable, Optional, Set, Tuple, TYPE_CHECKING
 
 import pandas as pd
 
-PRICE_ORACLE_FEATURE_SCHEMA = (
-    "is_influenced",
-    "ilvl",
-    "tier_life",
-    "tier_speed",
-    "tier_resist",
-    "tier_crit",
-    "open_affixes",
-    "meta_utility_score",
-)
+from core.item_normalizer import NormalizedMarketItem, normalized_item_from_item_state
+
+FAMILY_FEATURE_SCHEMAS: Dict[str, tuple[str, ...]] = {
+    "wand_caster": (
+        "ilvl",
+        "has_spell_damage",
+        "has_cast_speed",
+        "has_spell_crit",
+        "open_affixes",
+        "is_influenced",
+        "mod_count",
+    ),
+    "body_armour_defense": (
+        "ilvl",
+        "has_life",
+        "has_suppress",
+        "has_resist",
+        "open_prefixes",
+        "open_suffixes",
+        "is_influenced",
+    ),
+    "jewel_cluster": (
+        "ilvl",
+        "has_life",
+        "has_crit",
+        "has_resist",
+        "mod_count",
+        "open_affixes",
+    ),
+    "accessory_generic": (
+        "ilvl",
+        "has_life",
+        "has_resist",
+        "has_attributes",
+        "has_mana",
+        "mod_count",
+    ),
+    "generic": (
+        "ilvl",
+        "has_life",
+        "has_resist",
+        "has_crit",
+        "mod_count",
+        "open_affixes",
+    ),
+}
+
+PRICE_ORACLE_FEATURE_SCHEMA = FAMILY_FEATURE_SCHEMAS["generic"]
+MODEL_FAMILIES = tuple(FAMILY_FEATURE_SCHEMAS.keys())
 
 if TYPE_CHECKING:
     from core.graph_engine import ItemState
 
 
+@dataclass(frozen=True)
+class ValuationResult:
+    predicted_value: float
+    confidence: float
+    item_family: str
+    model_source: str
+    feature_completeness: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 class PricePredictor:
-    """
-    Oráculo de Previsão de Preços (Fase 5/6 - Módulo ML).
-    Tenta carregar um modelo XGBoost treinado em 'data/price_oracle.xgb'.
-    Faz fallback para avaliação preditiva hardcoded se o modelo não existir.
-    """
+    """Family-aware valuation engine with explicit fallbacks per item family."""
+
+    _FAMILY_SYNERGIES: Dict[str, Dict[frozenset[str], float]] = {
+        "wand_caster": {
+            frozenset({"SpellDamage1", "CastSpeed1"}): 220.0,
+            frozenset({"SpellDamage1", "CritChanceSpells1"}): 260.0,
+            frozenset({"SpellDamage1", "CastSpeed1", "CritChanceSpells1"}): 420.0,
+        },
+        "body_armour_defense": {
+            frozenset({"Life1", "SpellSuppress1"}): 180.0,
+            frozenset({"Life1", "Resist1"}): 130.0,
+            frozenset({"Life1", "SpellSuppress1", "Resist1"}): 340.0,
+        },
+        "jewel_cluster": {
+            frozenset({"Life1", "CritChanceSpells1"}): 120.0,
+            frozenset({"SpellDamage1", "CritChanceSpells1"}): 160.0,
+        },
+        "accessory_generic": {
+            frozenset({"Life1", "Resist1"}): 110.0,
+            frozenset({"Attributes1", "Resist1"}): 90.0,
+        },
+        "generic": {
+            frozenset({"Life1", "Resist1"}): 85.0,
+        },
+    }
+
+    _TOKEN_WEIGHTS: Dict[str, Dict[str, float]] = {
+        "wand_caster": {
+            "SpellDamage1": 70.0,
+            "CastSpeed1": 55.0,
+            "CritChanceSpells1": 65.0,
+            "Mana1": 12.0,
+        },
+        "body_armour_defense": {
+            "Life1": 50.0,
+            "SpellSuppress1": 60.0,
+            "Resist1": 30.0,
+        },
+        "jewel_cluster": {
+            "Life1": 40.0,
+            "SpellDamage1": 50.0,
+            "CritChanceSpells1": 42.0,
+            "Resist1": 25.0,
+        },
+        "accessory_generic": {
+            "Life1": 45.0,
+            "Resist1": 35.0,
+            "Attributes1": 25.0,
+            "Mana1": 15.0,
+        },
+        "generic": {
+            "Life1": 30.0,
+            "Resist1": 20.0,
+            "CritChanceSpells1": 25.0,
+            "SpellDamage1": 28.0,
+        },
+    }
 
     def __init__(self):
-        self.model = None
-        self._load_xgboost()
+        self.models: Dict[str, object] = {}
+        self._load_xgboost_models()
 
-        # Dicionários de sinergias (Mock Fallback).
-        self.synergies = {
-            "Wand": [
-                {"mods": {"SpellDamage1", "CastSpeed1"}, "value_chaos": 500.0},
-                {"mods": {"SpellDamage1", "CritChanceSpells1"}, "value_chaos": 400.0},
-            ],
-            "Body Armour": [
-                {"mods": {"Life1", "SpellSuppress1", "Resist1"}, "value_chaos": 1200.0}
-            ],
-        }
+    def _resolve_model_path(self, family: str) -> Path:
+        project_root = Path(__file__).resolve().parents[1]
+        return project_root / "data" / f"price_oracle_{family}.xgb"
 
-    def _load_xgboost(self):
-        model_path = self._resolve_model_path()
+    def _load_xgboost_models(self) -> None:
         try:
             import xgboost as xgb
-
-            if model_path.exists():
-                self.model = xgb.Booster()
-                self.model.load_model(str(model_path))
         except ImportError:
-            pass
-        except Exception:
-            self.model = None
+            return
 
-    def _resolve_model_path(self) -> Path:
-        project_root = Path(__file__).resolve().parents[1]
-        return project_root / "data" / "price_oracle.xgb"
+        for family in MODEL_FAMILIES:
+            model_path = self._resolve_model_path(family)
+            if not model_path.exists():
+                continue
+            try:
+                booster = xgb.Booster()
+                booster.load_model(str(model_path))
+                self.models[family] = booster
+            except Exception:
+                continue
 
-    def _extract_features(self, item_state: "ItemState") -> list:
-        """Extrai as 8 features usadas no nosso dataset de treino XGBoost."""
-        current_mods = set(item_state.prefixes).union(set(item_state.suffixes))
+    def _coerce_normalized_item(
+        self, item: NormalizedMarketItem | "ItemState"
+    ) -> NormalizedMarketItem:
+        if isinstance(item, NormalizedMarketItem):
+            return item
+        return normalized_item_from_item_state(item)
 
-        is_influenced = (
-            1 if item_state.is_fractured else 0
-        )  # Simplificação: usando fracture como influence flag pro mock
-        ilvl = item_state.ilvl
+    def _feature_map(self, item: NormalizedMarketItem) -> Dict[str, float]:
+        tokens = set(item.mod_tokens)
+        return {
+            "ilvl": float(item.ilvl),
+            "has_spell_damage": 1.0 if "SpellDamage1" in tokens else 0.0,
+            "has_cast_speed": 1.0 if "CastSpeed1" in tokens else 0.0,
+            "has_spell_crit": 1.0 if "CritChanceSpells1" in tokens else 0.0,
+            "has_life": 1.0 if "Life1" in tokens else 0.0,
+            "has_suppress": 1.0 if "SpellSuppress1" in tokens else 0.0,
+            "has_resist": 1.0 if "Resist1" in tokens else 0.0,
+            "has_crit": 1.0 if "CritChanceSpells1" in tokens else 0.0,
+            "has_attributes": 1.0 if "Attributes1" in tokens else 0.0,
+            "has_mana": 1.0 if "Mana1" in tokens else 0.0,
+            "mod_count": float(len(item.mod_tokens)),
+            "open_affixes": float(item.open_prefixes + item.open_suffixes),
+            "open_prefixes": float(item.open_prefixes),
+            "open_suffixes": float(item.open_suffixes),
+            "is_influenced": 1.0 if (item.fractured or item.influences) else 0.0,
+            "meta_utility_score": 0.0,
+        }
 
-        # Analisa Tiers simplificados para o modelo
-        tier_life = 0
-        tier_speed = 0
-        tier_resist = 0
-        tier_crit = 0
+    def _build_inference_dataframe(
+        self, item: NormalizedMarketItem | "ItemState", family: Optional[str] = None
+    ) -> pd.DataFrame:
+        normalized = self._coerce_normalized_item(item)
+        chosen_family = family or normalized.item_family
+        schema = FAMILY_FEATURE_SCHEMAS.get(chosen_family, FAMILY_FEATURE_SCHEMAS["generic"])
+        feature_map = self._feature_map(normalized)
+        row = {column: feature_map.get(column, 0.0) for column in schema}
+        return pd.DataFrame([row], columns=schema)
 
-        for mod in current_mods:
-            mod_lower = mod.lower()
-            if "life" in mod_lower:
-                tier_life = 1 if "1" in mod_lower else 2
-            if "speed" in mod_lower:
-                tier_speed = 1 if "1" in mod_lower else 2
-            if "resistance" in mod_lower or "resist" in mod_lower:
-                tier_resist = 1
-            if "critical" in mod_lower or "crit" in mod_lower:
-                tier_crit = 1
-
-        open_affixes = item_state.open_prefixes + item_state.open_suffixes
-
-        # meta_utility_score requer LadderAnalyzer - usando 0 como default
-        meta_utility_score = 0.0
-
-        return [
-            [
-                is_influenced,
-                ilvl,
-                tier_life,
-                tier_speed,
-                tier_resist,
-                tier_crit,
-                open_affixes,
-                meta_utility_score,
-            ]
-        ]
-
-    def _build_inference_dataframe(self, item_state: "ItemState") -> pd.DataFrame:
-        features = self._extract_features(item_state)
-        frame = pd.DataFrame.from_records(features)
-        frame.columns = pd.Index(PRICE_ORACLE_FEATURE_SCHEMA)
-        return frame
-
-    def predict_value(self, item_state: "ItemState") -> Tuple[float, float]:
-        """
-        Calcula o valor estimado de venda do item atual.
-        Usa o XGBoost se carregado, senão cai na heurística base.
-
-        Returns:
-            Tuple[float, float]: (preco_previsto, confianca)
-                - confianca: float entre 0.0 e 1.0
-        """
-        current_mods = set(item_state.prefixes).union(set(item_state.suffixes))
-        if not current_mods:
-            return (0.0, 0.3)
-
-        confianca = self._calculate_confidence(item_state, current_mods)
-
-        # -- XGBoost Inference --
-        if self.model:
-            import xgboost as xgb
-
-            df = self._build_inference_dataframe(item_state)
-            dmatrix = xgb.DMatrix(df)
-
-            prediction = self.model.predict(dmatrix)
-            preco = max(0.0, float(prediction[0]))
-            return (preco, confianca)
-
-        # -- Fallback Heuristic --
-        best_value = 0.0
-
-        # Checamos sinergias genéricas baseadas na classificação bruta do nome por simplicidade
-        item_class = "Wand" if "Wand" in item_state.base_type else "Unknown"
-
-        for rule in self.synergies.get(item_class, []):
-            if rule["mods"].issubset(current_mods):
-                if rule["value_chaos"] > best_value:
-                    best_value = rule["value_chaos"]
-
-        # Valor inerente de cada mod isolado (Tier 1 = ~10c)
-        base_mod_value = len(current_mods) * 10.0
-
-        preco = max(best_value, base_mod_value)
-        return (preco, confianca)
-
-    def _calculate_confidence(
-        self, item_state: "ItemState", current_mods: Set[str]
-    ) -> float:
-        """
-        Calcula a confiança da previsão baseada em múltiplos fatores.
-
-        Fatores:
-            - Modelo XGBoost carregado: +0.7 (confiança base)
-            - Item com mods conhecidos (sinergia): +0.15
-            - Item com influence ou fractured: +0.1
-            - Item com ilvl > 80: +0.05
-            - Mínimo: 0.3 (fallback heurística)
-
-        Returns:
-            float: Confiança entre 0.0 e 1.0
-        """
-        confidence = 0.0
-
-        # Se o modelo XGBoost está carregado, confiança base de 0.7
-        if self.model:
-            confidence += 0.7
+    def _feature_completeness(self, item: NormalizedMarketItem) -> float:
+        tokens = set(item.mod_tokens)
+        if item.item_family == "wand_caster":
+            required = {"SpellDamage1", "CastSpeed1", "CritChanceSpells1"}
+        elif item.item_family == "body_armour_defense":
+            required = {"Life1", "SpellSuppress1", "Resist1"}
+        elif item.item_family == "jewel_cluster":
+            required = {"Life1", "CritChanceSpells1"}
+        elif item.item_family == "accessory_generic":
+            required = {"Life1", "Resist1", "Attributes1"}
         else:
-            # Fallback sem modelo, confiança mais baixa mas ainda válida
-            confidence += 0.3
+            required = {"Life1", "Resist1"}
+        hits = len(required.intersection(tokens))
+        return round(max(0.2, hits / max(len(required), 1)), 2)
 
-        # Verifica se o item tem mods conhecidos (está no dicionário de sinergias)
-        item_class = "Wand" if "Wand" in item_state.base_type else "Unknown"
-        known_synergy = False
-        for rule in self.synergies.get(item_class, []):
-            if rule["mods"].issubset(current_mods):
-                known_synergy = True
-                break
+    def _fallback_value(self, item: NormalizedMarketItem) -> float:
+        weights = self._TOKEN_WEIGHTS.get(item.item_family, self._TOKEN_WEIGHTS["generic"])
+        token_value = sum(weights.get(token, 8.0) for token in item.mod_tokens)
+        synergy_bonus = 0.0
+        for token_set, bonus in self._FAMILY_SYNERGIES.get(item.item_family, {}).items():
+            if token_set.issubset(set(item.mod_tokens)):
+                synergy_bonus = max(synergy_bonus, bonus)
+        ilvl_bonus = max(0.0, item.ilvl - 75) * 1.5
+        openness_bonus = (item.open_prefixes + item.open_suffixes) * 4.0
+        influence_bonus = 18.0 if (item.fractured or item.influences) else 0.0
+        base_floor = {
+            "wand_caster": 18.0,
+            "body_armour_defense": 24.0,
+            "jewel_cluster": 12.0,
+            "accessory_generic": 15.0,
+            "generic": 10.0,
+        }.get(item.item_family, 10.0)
+        return round(base_floor + token_value + synergy_bonus + ilvl_bonus + openness_bonus + influence_bonus, 1)
 
-        if known_synergy:
-            confidence += 0.15
-
-        # Verifica se o item tem influence ou fractured
-        if item_state.is_fractured:
+    def _fallback_confidence(self, item: NormalizedMarketItem, model_loaded: bool) -> float:
+        confidence = 0.35 if not model_loaded else 0.55
+        confidence += self._feature_completeness(item) * 0.25
+        if item.item_family != "generic":
             confidence += 0.1
-
-        # Verifica ilvl alto (> 80)
-        if item_state.ilvl > 80:
+        if item.fractured or item.influences:
             confidence += 0.05
+        if item.ilvl >= 84:
+            confidence += 0.05
+        return round(max(0.3, min(0.95, confidence)), 2)
 
-        # Confiança mínima de 0.3 (fallback heurística)
-        return max(0.3, min(1.0, confidence))
+    def predict(self, item: NormalizedMarketItem | "ItemState") -> ValuationResult:
+        normalized = self._coerce_normalized_item(item)
+        family = normalized.item_family or "generic"
+        model = self.models.get(family)
+        feature_completeness = self._feature_completeness(normalized)
+
+        if model is not None:
+            try:
+                import xgboost as xgb
+
+                frame = self._build_inference_dataframe(normalized, family=family)
+                model_feature_names = list(getattr(model, "feature_names", []) or [])
+                if model_feature_names:
+                    for column in model_feature_names:
+                        if column not in frame.columns:
+                            frame[column] = 0.0
+                    frame = frame.reindex(columns=model_feature_names, fill_value=0.0)
+                prediction = model.predict(xgb.DMatrix(frame))
+                predicted_value = max(0.0, float(prediction[0]))
+                confidence = self._fallback_confidence(normalized, model_loaded=True)
+                return ValuationResult(
+                    predicted_value=round(predicted_value, 1),
+                    confidence=confidence,
+                    item_family=family,
+                    model_source="family_model",
+                    feature_completeness=feature_completeness,
+                )
+            except Exception:
+                pass
+
+        return ValuationResult(
+            predicted_value=self._fallback_value(normalized),
+            confidence=self._fallback_confidence(normalized, model_loaded=False),
+            item_family=family,
+            model_source="family_fallback",
+            feature_completeness=feature_completeness,
+        )
+
+    def predict_value(self, item: NormalizedMarketItem | "ItemState") -> Tuple[float, float]:
+        result = self.predict(item)
+        return (result.predicted_value, result.confidence)
 
 
 class CraftingHeuristic:
     """
-    Inteligência de Poda Heurística.
-    Analisa semanticamente a Ação x Objetivo antes de executar a matemática pesada do Evaluator.
+    Inteligência de poda heurística para o grafo de craft.
     """
 
     def __init__(self):
@@ -210,15 +292,9 @@ class CraftingHeuristic:
     def should_prune(
         self, item_state: "ItemState", action_name: str, target_mods: Set[str]
     ) -> bool:
-        """
-        Heurística Direcional. Retorna True se o branch de busca deve ser ASSASSINADO instantaneamente.
-        Evita a explosão combinatória do A* testar Fossils ou Orbs inúteis pro alvo de forma cega.
-        """
-        # Exemplo 1: Target quer Physical, mas o algoritmo sugeriu "Metallic Fossil". O Metallic BLOQUEIA Physical.
-        # Logo essa ação nasce morta e a heurística não gasta ciclos da CPU verificando o Evaluator.
         if "Metallic Fossil" in action_name:
             if any("phys" in mod.lower() for mod in target_mods):
-                return True  # Prune it!
+                return True
 
         if "Corroded Fossil" in action_name:
             if any(
@@ -227,10 +303,9 @@ class CraftingHeuristic:
             ):
                 return True
 
-        # Exemplo 2: Bloqueio Lógico. Se queremos adicionar Prefixos, e sugerimos Harvest, mas
-        # o item já está com 3 prefixos e não usamos Annul... Morre aqui.
         if "Slam Exalted Orb" in action_name:
             if item_state.open_prefixes == 0 and item_state.open_suffixes == 0:
                 return True
 
         return False
+
