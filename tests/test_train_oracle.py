@@ -255,6 +255,7 @@ def test_train_registers_registry_decision_in_metadata(monkeypatch) -> None:
         }
     )
     captured = {"models": []}
+    captured_registry_kwargs = {}
 
     monkeypatch.setattr("scripts.train_oracle.ITEM_FAMILIES", ["generic"])
     monkeypatch.setattr(
@@ -285,14 +286,24 @@ def test_train_registers_registry_decision_in_metadata(monkeypatch) -> None:
             "model_sha256": "model-hash",
         },
     )
-    monkeypatch.setattr(
-        "scripts.train_oracle.register_and_evaluate_candidate",
-        lambda **_kwargs: {
+
+    def _fake_register_and_evaluate_candidate(**kwargs):
+        captured_registry_kwargs.update(kwargs)
+        return {
             "family": "generic",
             "status": "active",
             "promoted": True,
-            "reason": "rmse_lt_baseline",
-        },
+            "reason": "promotion_policy_satisfied",
+            "decision_reason": "promotion_policy_satisfied",
+            "policy": {
+                "max_rmse_ratio": kwargs.get("max_rmse_ratio"),
+                "min_abs_improvement": kwargs.get("min_abs_improvement"),
+            },
+        }
+
+    monkeypatch.setattr(
+        "scripts.train_oracle.register_and_evaluate_candidate",
+        _fake_register_and_evaluate_candidate,
     )
 
     def _capture_metadata(**kwargs):
@@ -303,7 +314,15 @@ def test_train_registers_registry_decision_in_metadata(monkeypatch) -> None:
         "scripts.train_oracle.persist_model_metadata", _capture_metadata
     )
 
-    train_xgboost_oracle(source="api")
+    train_xgboost_oracle(
+        source="api",
+        promotion_max_rmse_ratio=0.95,
+        promotion_min_abs_improvement=0.2,
+        registry_path="custom/registry.json",
+    )
 
     assert captured["models"]
     assert captured["models"][0]["registry_decision"]["status"] == "active"
+    assert captured_registry_kwargs["max_rmse_ratio"] == 0.95
+    assert captured_registry_kwargs["min_abs_improvement"] == 0.2
+    assert str(captured_registry_kwargs["registry_path"]) == "custom/registry.json"

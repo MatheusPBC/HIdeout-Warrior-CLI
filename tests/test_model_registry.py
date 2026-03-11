@@ -44,8 +44,14 @@ def test_promote_if_better_sets_active_version(tmp_path: Path) -> None:
     family_entry = registry["families"]["generic"]
 
     assert decision["promoted"] is True
+    assert decision["decision_reason"] == "promotion_policy_satisfied"
+    assert decision["policy"]["max_rmse_ratio"] == 1.0
+    assert decision["policy"]["min_abs_improvement"] == 0.0
     assert family_entry["active_version"] == "run-002"
     assert family_entry["versions"][0]["status"] == "active"
+    assert (
+        family_entry["versions"][0]["decision_reason"] == "promotion_policy_satisfied"
+    )
 
 
 def test_promote_if_better_rejects_when_rmse_not_lower(tmp_path: Path) -> None:
@@ -65,5 +71,35 @@ def test_promote_if_better_rejects_when_rmse_not_lower(tmp_path: Path) -> None:
     registry = load_registry(registry_path)
 
     assert decision["promoted"] is False
+    assert decision["decision_reason"] == "rmse_above_ratio_threshold"
     assert registry["families"]["generic"]["active_version"] is None
     assert registry["families"]["generic"]["versions"][0]["status"] == "rejected"
+
+
+def test_promote_if_better_rejects_when_improvement_below_threshold(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "registry.json"
+    register_candidate(
+        family="generic",
+        run_id="run-004",
+        model_path="data/price_oracle_generic.xgb",
+        model_sha256="sha-4",
+        metrics={"rmse": 9.5, "baseline_rmse": 10.0},
+        registry_path=registry_path,
+    )
+
+    decision = promote_if_better(
+        family="generic",
+        run_id="run-004",
+        max_rmse_ratio=1.0,
+        min_abs_improvement=1.0,
+        registry_path=registry_path,
+    )
+    registry = load_registry(registry_path)
+
+    assert decision["promoted"] is False
+    assert decision["decision_reason"] == "abs_improvement_below_threshold"
+    assert registry["families"]["generic"]["versions"][0]["decision_reason"] == (
+        "abs_improvement_below_threshold"
+    )

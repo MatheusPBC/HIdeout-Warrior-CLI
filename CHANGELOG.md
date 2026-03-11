@@ -42,6 +42,12 @@
 - Integrado `core/ml_oracle.py` para resolver modelo ativo por família via registry com fallback compatível para `data/price_oracle_<family>.xgb` quando registry ausente/inválido.
 - Adicionados/atualizados testes em `tests/test_model_registry.py`, `tests/test_train_oracle.py`, `tests/test_ml_oracle.py`, `tests/test_market_scanner.py` e `tests/test_firehose_miner.py` cobrindo métricas operacionais, registry e fallback legado.
 - Validação executada nesta fase: `pytest -q tests/test_model_registry.py tests/test_train_oracle.py tests/test_ml_oracle.py tests/test_market_scanner.py tests/test_firehose_miner.py` com **36 passed** e `pytest -q` com **60 passed**.
+- Endurecida a política de promoção no `scripts/model_registry.py` com thresholds configuráveis (`max_rmse_ratio`, `min_abs_improvement`), avaliação composta por razão e ganho absoluto, além da persistência de `policy` e `decision_reason` por versão.
+- Integrado o `scripts/train_oracle.py` com novas flags de promotion policy e `--registry-path`, propagando os parâmetros para o fluxo de registro/promoção sem quebrar defaults existentes.
+- Criado `scripts/ops_cycle.py` com comando `run` para orquestrar miner -> snapshot -> treino em sequência, com modo fail-fast/continue-on-error e emissão de métrica operacional `ops_cycle.daily_run` em `data/ops_metrics/`.
+- Criado `scripts/ops_report.py` com comando `build` para consolidar métricas JSONL por componente (runs, ok/error, error_rate, avg/p50/p95, last_ts_utc), mesclar estado ativo do registry por família e gerar relatório em `data/ops_reports/`.
+- Adicionados novos testes em `tests/test_ops_cycle.py` e `tests/test_ops_report.py`, além de expansão em `tests/test_model_registry.py` e `tests/test_train_oracle.py` para cobrir policy thresholds e repasse de opções no treino.
+- Validação executada nesta fase: `pytest -q tests/test_model_registry.py tests/test_train_oracle.py tests/test_ops_cycle.py tests/test_ops_report.py` com **17 passed** e `pytest -q` com **66 passed**.
 
 ## 2026-03-10
 

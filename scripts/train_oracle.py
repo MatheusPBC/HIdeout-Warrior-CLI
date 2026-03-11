@@ -792,6 +792,9 @@ def train_xgboost_oracle(
     source: str = "api",
     sqlite_path: str = "data/firehose.db",
     parquet_path: str = "data/firehose.parquet",
+    promotion_max_rmse_ratio: float = 1.0,
+    promotion_min_abs_improvement: float = 0.0,
+    registry_path: str = "data/model_registry/registry.json",
 ) -> None:
     print("[Training] Iniciando treino por família")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -856,6 +859,9 @@ def train_xgboost_oracle(
             model_path=str(report["model_path"]),
             model_sha256=str(report["model_sha256"]),
             metrics=cast(Dict[str, Any], report.get("metrics", {})),
+            max_rmse_ratio=promotion_max_rmse_ratio,
+            min_abs_improvement=promotion_min_abs_improvement,
+            registry_path=Path(registry_path),
         )
         report["registry_decision"] = decision
 
@@ -897,6 +903,21 @@ if __name__ == "__main__":
         parquet_path: str = typer.Option(
             "data/firehose.parquet", "--parquet-path", help="Parquet source path"
         ),
+        promotion_max_rmse_ratio: float = typer.Option(
+            1.0,
+            "--promotion-max-rmse-ratio",
+            help="Registry promotion policy: max RMSE ratio vs baseline",
+        ),
+        promotion_min_abs_improvement: float = typer.Option(
+            0.0,
+            "--promotion-min-abs-improvement",
+            help="Registry promotion policy: min absolute RMSE improvement",
+        ),
+        registry_path: str = typer.Option(
+            "data/model_registry/registry.json",
+            "--registry-path",
+            help="Model registry path",
+        ),
     ):
         train_xgboost_oracle(
             league=league,
@@ -904,6 +925,9 @@ if __name__ == "__main__":
             source=source,
             sqlite_path=sqlite_path,
             parquet_path=parquet_path,
+            promotion_max_rmse_ratio=promotion_max_rmse_ratio,
+            promotion_min_abs_improvement=promotion_min_abs_improvement,
+            registry_path=registry_path,
         )
 
     app()
