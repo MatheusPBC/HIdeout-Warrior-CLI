@@ -1,3 +1,4 @@
+from collections import deque
 import pytest
 import sys
 import os
@@ -180,3 +181,56 @@ class TestAutoResolveTradeLeague:
         result = client._resolve_trade_league("auto")
 
         assert result == "Standard"
+
+
+class TestRateLimitHandling:
+    @patch.object(MarketAPIClient, "_resolve_trade_league", return_value="Standard")
+    def test_sync_rate_limit_headers_updates_rules(self, _mock_resolve):
+        client = MarketAPIClient(league="Standard", data_dir="/tmp/test_data")
+        response = MagicMock()
+        response.headers = {
+            "X-Rate-Limit-Ip": "10:5:10",
+            "X-Rate-Limit-Ip-State": "4:5:0",
+        }
+
+        client._sync_rate_limit_headers(response)
+
+        assert client._ip_rate_rules == [(10, 5, 10)]
+        assert len(client._ip_request_history) == 1
+
+    @patch.object(MarketAPIClient, "_resolve_trade_league", return_value="Standard")
+    def test_throttle_waits_when_window_is_full(self, _mock_resolve):
+        client = MarketAPIClient(league="Standard", data_dir="/tmp/test_data")
+        fake_time = {"now": 100.0}
+
+        client._ip_rate_rules = [(10, 5, 10)]
+        client._ip_request_history = [
+            deque([96.0, 96.0, 96.0, 96.0, 96.0, 96.0, 96.0, 96.0, 96.0])
+        ]
+
+        def _fake_sleep(seconds):
+            fake_time["now"] += seconds
+
+        with patch(
+            "core.api_integrator.time.time", side_effect=lambda: fake_time["now"]
+        ):
+            with patch(
+                "core.api_integrator.time.sleep", side_effect=_fake_sleep
+            ) as mock_sleep:
+                client._throttle_before_request()
+
+        assert mock_sleep.called
+
+    @patch.object(MarketAPIClient, "_resolve_trade_league", return_value="Standard")
+    def test_circuit_breaker_sets_next_allowed_on_429(self, _mock_resolve):
+        client = MarketAPIClient(league="Standard", data_dir="/tmp/test_data")
+        response = MagicMock()
+        response.status_code = 429
+        response.headers = {"Retry-After": "7"}
+
+        with patch("core.api_integrator.time.sleep", return_value=None) as mock_sleep:
+            with patch("core.api_integrator.time.time", return_value=100.0):
+                client._circuit_breaker(response)
+
+        assert client._next_allowed_request_ts >= 107.0
+        mock_sleep.assert_called_with(7)

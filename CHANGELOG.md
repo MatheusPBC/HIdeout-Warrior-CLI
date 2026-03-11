@@ -57,6 +57,10 @@
 - Ajustados bootstrap/execução direta dos scripts operacionais, incluindo repasse explícito do token no `scripts/ops_cycle.py`.
 - Atualizados os testes em `tests/test_firehose_miner.py` e `tests/test_ops_cycle.py` para cobrir autorização OAuth e propagação de parâmetros.
 - Validação executada nesta fase: `pytest -q tests/test_trade_bucket_collector.py tests/test_training_snapshot_job.py tests/test_train_oracle.py` com **13 passed** e `pytest -q` com **72 passed**.
+- Atualizado `core/api_integrator.py` com throttling preventivo via fallback `10:5:10`, sincronização dos headers `X-Rate-Limit-Ip`/`X-Rate-Limit-Ip-State`, espera por `Retry-After` em `429` e remoção do `sleep` fixo no `fetch`.
+- Ajustado `core/market_scanner.py` para remover o filtro inválido `misc_filters.filters.influence` (variação `is_influenced`), evitando erro `400` da Trade API durante o macro sweep.
+- Expandido `tests/test_api_integrator.py` para cobrir parse/sincronização das regras de rate limit, throttle por janela cheia e atualização de `next_allowed_request_ts` em `429`.
+- Validação executada nesta etapa: `pytest -q tests/test_api_integrator.py` com **18 passed** e `pytest -q` com **75 passed**.
 
 ## 2026-03-10
 

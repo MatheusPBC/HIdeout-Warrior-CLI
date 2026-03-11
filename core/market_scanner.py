@@ -209,9 +209,9 @@ class OnDemandScanner:
             query["query"]["type"] = item_class
 
         if is_influenced:
-            query["query"]["filters"]["misc_filters"]["filters"]["influence"] = {
-                "option": "true"
-            }
+            # Trade API atual rejeita o filtro legacy `misc_filters.filters.influence`.
+            # Mantemos a assinatura por compatibilidade e ignoramos a variação aqui.
+            pass
 
         return query
 
@@ -264,7 +264,7 @@ class OnDemandScanner:
                 effective_min_price = max(min_price, min_listed_price, 1.0)
                 if max_price is not None and effective_min_price >= max_price:
                     continue
-                for influenced in (False, True):
+                for influenced in (False,):
                     query = self.build_trade_query(
                         item_class=item_class,
                         ilvl_min=ilvl_low,

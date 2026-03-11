@@ -1,9 +1,10 @@
+from collections import deque
 import json
 import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -36,10 +37,106 @@ class MarketAPIClient:
         os.makedirs(self.data_dir, exist_ok=True)
 
         self._available_leagues: Optional[List[str]] = None
+        # Fallback conservador para policy comum 10:5:10.
+        self._ip_rate_rules: List[Tuple[int, int, int]] = [(10, 5, 10)]
+        self._ip_request_history: List[Deque[float]] = [deque()]
+        self._next_allowed_request_ts = 0.0
+        self._rate_limit_safety_margin = 1
         self.league = self._resolve_trade_league(league)
         self.market_cache_file = os.path.join(
             self.data_dir, self._league_cache_filename(self.league)
         )
+
+    def _parse_rate_limit_rules(
+        self, header_value: Optional[str]
+    ) -> List[Tuple[int, int, int]]:
+        if not header_value:
+            return []
+        parsed: List[Tuple[int, int, int]] = []
+        for raw_rule in header_value.split(","):
+            parts = raw_rule.split(":")
+            if len(parts) < 3:
+                continue
+            try:
+                max_hits = int(parts[0])
+                period_seconds = int(parts[1])
+                restricted_seconds = int(parts[2])
+            except (TypeError, ValueError):
+                continue
+            if max_hits > 0 and period_seconds > 0:
+                parsed.append((max_hits, period_seconds, restricted_seconds))
+        return parsed
+
+    def _sync_rate_limit_headers(self, response: requests.Response) -> None:
+        rules = self._parse_rate_limit_rules(response.headers.get("X-Rate-Limit-Ip"))
+        if rules:
+            self._ip_rate_rules = rules
+            while len(self._ip_request_history) < len(self._ip_rate_rules):
+                self._ip_request_history.append(deque())
+            while len(self._ip_request_history) > len(self._ip_rate_rules):
+                self._ip_request_history.pop()
+
+        state_rules = self._parse_rate_limit_rules(
+            response.headers.get("X-Rate-Limit-Ip-State")
+        )
+        now = time.time()
+        for current_hits, period_seconds, active_restricted in state_rules:
+            if active_restricted > 0:
+                self._next_allowed_request_ts = max(
+                    self._next_allowed_request_ts,
+                    now + active_restricted,
+                )
+
+            if self._ip_rate_rules:
+                max_hits = self._ip_rate_rules[0][0]
+                remaining = max_hits - current_hits
+                if remaining <= 1:
+                    cooldown = min(max(period_seconds / max(max_hits, 1), 0.2), 2.0)
+                    logger.warning(
+                        "[%s] Limite de requests proximo (%s restantes). Esfriando %.1fs.",
+                        self.league,
+                        max(remaining, 0),
+                        cooldown,
+                    )
+                    time.sleep(cooldown)
+
+    def _throttle_before_request(self) -> None:
+        now = time.time()
+        if now < self._next_allowed_request_ts:
+            wait = max(self._next_allowed_request_ts - now, 0.0)
+            if wait > 0:
+                logger.warning(
+                    "[%s] Aguardando %.1fs para respeitar rate limit.",
+                    self.league,
+                    wait,
+                )
+                time.sleep(wait)
+
+        for idx, (max_hits, period_seconds, _restricted) in enumerate(
+            self._ip_rate_rules
+        ):
+            history = self._ip_request_history[idx]
+            allowed_hits = max(1, max_hits - self._rate_limit_safety_margin)
+
+            while True:
+                now = time.time()
+                while history and (now - history[0]) >= period_seconds:
+                    history.popleft()
+
+                if len(history) < allowed_hits:
+                    break
+
+                wait = max((history[0] + period_seconds) - now + 0.05, 0.05)
+                logger.debug(
+                    "[%s] Throttle preventivo aguardando %.2fs (regra %s:%s).",
+                    self.league,
+                    wait,
+                    max_hits,
+                    period_seconds,
+                )
+                time.sleep(wait)
+
+            history.append(time.time())
 
     def _league_cache_filename(self, league: str) -> str:
         sanitized = re.sub(r"[^a-z0-9]+", "_", league.lower()).strip("_")
@@ -51,7 +148,9 @@ class MarketAPIClient:
 
         url = f"{self.ggg_base_url}/data/leagues"
         try:
+            self._throttle_before_request()
             response = self.session.get(url, timeout=15)
+            self._sync_rate_limit_headers(response)
             response.raise_for_status()
             payload = response.json()
 
@@ -134,7 +233,9 @@ class MarketAPIClient:
             with open(self.market_cache_file, "r", encoding="utf-8") as handle:
                 return json.load(handle)
 
-        url = f"{self.ninja_base_url}/currencyoverview?league={self.league}&type=Currency"
+        url = (
+            f"{self.ninja_base_url}/currencyoverview?league={self.league}&type=Currency"
+        )
         try:
             response = requests.get(
                 url,
@@ -156,6 +257,7 @@ class MarketAPIClient:
             return {}
 
     def _circuit_breaker(self, response: requests.Response):
+        self._sync_rate_limit_headers(response)
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After", 60)
             try:
@@ -163,41 +265,37 @@ class MarketAPIClient:
             except ValueError:
                 wait_time = 60
             logger.error("[%s] HTTP 429. Pausando por %ss.", self.league, wait_time)
+            self._next_allowed_request_ts = max(
+                self._next_allowed_request_ts,
+                time.time() + wait_time,
+            )
             time.sleep(wait_time)
             return
-
-        state_header = response.headers.get("X-Rate-Limit-Ip-State")
-        limit_header = response.headers.get("X-Rate-Limit-Ip")
-        if state_header and limit_header:
-            for rule in state_header.split(","):
-                parts = rule.split(":")
-                if len(parts) < 3:
-                    continue
-                try:
-                    current_hits = int(parts[0])
-                    max_hits = int(parts[1])
-                except (ValueError, TypeError):
-                    continue
-                if (max_hits - current_hits) <= 1:
-                    logger.warning("[%s] Limite de requests proximo. Esfriando por 3s.", self.league)
-                    time.sleep(3)
 
     def search_items(self, query_json: dict) -> Tuple[str, List[str]]:
         league_encoded = quote(self.league, safe="")
         url = f"{self.ggg_base_url}/search/{league_encoded}"
         try:
+            self._throttle_before_request()
             response = self.session.post(url, json=query_json, timeout=15)
             self._circuit_breaker(response)
             if response.status_code == 200:
                 data = response.json()
                 return data.get("id", ""), data.get("result", [])
-            logger.error("[%s] Search Error %s: %s", self.league, response.status_code, response.text)
+            logger.error(
+                "[%s] Search Error %s: %s",
+                self.league,
+                response.status_code,
+                response.text,
+            )
             return "", []
         except requests.exceptions.RequestException as exc:
             logger.error("[%s] Erro na busca da trade API: %s", self.league, exc)
             return "", []
 
-    def fetch_item_details(self, item_ids: List[str], query_id: str) -> List[Dict[str, Any]]:
+    def fetch_item_details(
+        self, item_ids: List[str], query_id: str
+    ) -> List[Dict[str, Any]]:
         if not item_ids:
             return []
 
@@ -206,15 +304,20 @@ class MarketAPIClient:
 
         ids_str = ",".join(item_ids)
         url = f"{self.ggg_base_url}/fetch/{ids_str}?query={query_id}"
-        time.sleep(0.5)
 
         try:
+            self._throttle_before_request()
             response = self.session.get(url, timeout=15)
             self._circuit_breaker(response)
             if response.status_code == 200:
                 data = response.json()
                 return data.get("result", [])
-            logger.error("[%s] Fetch Error %s: %s", self.league, response.status_code, response.text)
+            logger.error(
+                "[%s] Fetch Error %s: %s",
+                self.league,
+                response.status_code,
+                response.text,
+            )
             return []
         except requests.exceptions.RequestException as exc:
             logger.error("[%s] Erro no fetch da trade API: %s", self.league, exc)
