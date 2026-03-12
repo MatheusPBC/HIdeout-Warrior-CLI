@@ -302,7 +302,33 @@ def _render_flip_plan(plan):
     summary.add_row(
         Text(f"Confiança do plano: {plan.plan_confidence:.2f}", style="bold blue")
     )
+    summary.add_row(
+        Text(
+            "Breakdown: "
+            f"base {plan.confidence_breakdown.base_confidence:.2f} | "
+            f"craft {plan.confidence_breakdown.craft_confidence:.2f} | "
+            f"exit {plan.confidence_breakdown.exit_confidence:.2f}",
+            style="blue",
+        )
+    )
+    summary.add_row(
+        Text(
+            f"Trusted profit: {plan.trusted_profit:.1f}c | Exit evidence: {plan.exit_estimate.evidence_strength}",
+            style="bold green",
+        )
+    )
+    summary.add_row(
+        Text(
+            "Exit market: "
+            f"floor {plan.exit_estimate.market_floor:.1f}c | "
+            f"median {plan.exit_estimate.market_median:.1f}c | "
+            f"comparables {plan.exit_estimate.comparables_count} | "
+            f"links {plan.exit_estimate.required_structure.get('link_count', 0)}",
+            style="dim",
+        )
+    )
     summary.add_row(Text(f"Stop-and-sell: {plan.stop_condition}", style="white"))
+    summary.add_row(Text(plan.plan_explanation, style="dim"))
     if plan.risk_notes:
         summary.add_row(Text(f"Riscos: {', '.join(plan.risk_notes)}", style="red"))
     if plan.alternatives:

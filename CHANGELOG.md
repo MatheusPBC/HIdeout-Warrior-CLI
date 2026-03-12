@@ -2,6 +2,15 @@
 
 ## 2026-03-11
 
+- Endurecido o `flip-plan` em `core/flip_planner.py` com pipeline em dois estagios (`Stage A`/`Stage B`), `trusted_profit`, confianca composta (`PlanConfidenceBreakdown`) e `plan_explanation` auditavel por plano.
+- Adicionada validacao estrutural para `body_armour`: alvos com `Spell Suppression` agora so passam em bases com componente `Evasion`/`Dex`, e o planner bloqueia rotas mecanicamente impossiveis em vez de assumir craft valido.
+- Incorporado `ExitMarketEstimate` no planner com consenso entre valuation e mercado de saida, incluindo `evidence_strength`, estrutura exigida e fallback conservador quando a evidencia e fraca.
+- Modelado o custo oculto de `6-link` no planner via `socket_linking`, usando taxa de `Orb of Fusing` da economia atual e impedindo projecao de saida em mercado `6-link` sem custo compativel no plano.
+- Expandido o contrato do scanner em `core/market_scanner.py` para carregar sinais estruturais consumidos pelo planner (`defence_profile`, `attribute_profile`, `socket_count`, `link_count`, `socket_colour_profile`).
+- Atualizada a renderizacao da CLI em `cli.py` para exibir breakdown de confianca, `trusted_profit`, evidencia de saida e explicacao detalhada do plano de flip.
+- Atualizados os testes direcionados em `tests/test_flip_planner.py` e adicionado `tests/test_flip_body_armour_contracts.py` cobrindo rejeicao de suppression em base incompativel, custo de `6-link` e fallback para saidas sem linking quando o orcamento nao comporta o mercado final.
+- Validacao executada nesta etapa: `pytest -q tests/test_flip_planner.py tests/test_flip_body_armour_contracts.py` com **5 passed** e `py_compile` dos arquivos alterados sem erros.
+
 - Endurecido o consenso híbrido em `core/market_scanner.py` para baixa evidência de mercado: quando `comparables_count < 3` e `ml_value` diverge da mediana (`>2x`/`>3x`), a oportunidade é bloqueada com motivos explícitos (`low_evidence_ml_market_divergence_2x`/`3x`) refletidos na `valuation_explanation`.
 - Aplicado corte a frio no Stage A para `ilvl < 75` sem `twink_override`, evitando valuation pesado em itens de baixo contexto e adicionando o contador `filtered_stage_a_low_ilvl_no_twink` nas métricas operacionais do scanner.
 - Adicionada penalização forte de score para divergência ML vs mercado com pouca evidência no enriquecimento de contexto, reduzindo promoção de outliers mesmo antes do gate final de consenso.

@@ -50,6 +50,11 @@ class ListingSnapshot:
     tier_ilvl_mismatch: bool = False
     low_ilvl_context: bool = False
     fractured_low_ilvl_brick: bool = False
+    defence_profile: str = "unknown"
+    attribute_profile: str = "unknown"
+    socket_count: int = 0
+    link_count: int = 0
+    socket_colour_profile: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -133,6 +138,11 @@ class ScanOpportunity:
     low_ilvl_context: bool = False
     tier_ilvl_mismatch: bool = False
     fractured_low_ilvl_brick: bool = False
+    defence_profile: str = "unknown"
+    attribute_profile: str = "unknown"
+    socket_count: int = 0
+    link_count: int = 0
+    socket_colour_profile: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -186,6 +196,11 @@ class ScanOpportunity:
             low_ilvl_context=data.get("low_ilvl_context", False),
             tier_ilvl_mismatch=data.get("tier_ilvl_mismatch", False),
             fractured_low_ilvl_brick=data.get("fractured_low_ilvl_brick", False),
+            defence_profile=data.get("defence_profile", "unknown"),
+            attribute_profile=data.get("attribute_profile", "unknown"),
+            socket_count=data.get("socket_count", 0),
+            link_count=data.get("link_count", 0),
+            socket_colour_profile=data.get("socket_colour_profile", ""),
         )
 
 
@@ -814,6 +829,11 @@ class OnDemandScanner:
             tier_ilvl_mismatch=normalized_item.tier_ilvl_mismatch,
             low_ilvl_context=normalized_item.low_ilvl_context,
             fractured_low_ilvl_brick=normalized_item.fractured_low_ilvl_brick,
+            defence_profile=getattr(normalized_item, "defence_profile", "unknown"),
+            attribute_profile=getattr(normalized_item, "attribute_profile", "unknown"),
+            socket_count=int(getattr(normalized_item, "socket_count", 0) or 0),
+            link_count=int(getattr(normalized_item, "link_count", 0) or 0),
+            socket_colour_profile=str(getattr(normalized_item, "socket_colour_profile", "") or ""),
         )
 
     def _apply_low_evidence_cap(self, opportunity: ScanOpportunity) -> None:
@@ -947,6 +967,11 @@ class OnDemandScanner:
             low_ilvl_context=snapshot.low_ilvl_context,
             tier_ilvl_mismatch=snapshot.tier_ilvl_mismatch,
             fractured_low_ilvl_brick=snapshot.fractured_low_ilvl_brick,
+            defence_profile=snapshot.defence_profile,
+            attribute_profile=snapshot.attribute_profile,
+            socket_count=snapshot.socket_count,
+            link_count=snapshot.link_count,
+            socket_colour_profile=snapshot.socket_colour_profile,
         )
         opportunity.valuation_explanation = self._build_valuation_explanation(
             opportunity
