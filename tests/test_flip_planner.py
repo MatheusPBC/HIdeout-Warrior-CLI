@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
-from core.flip_planner import FlipAdvisor, FlipTargetRecommendation
+from core.flip_planner import FlipAdvisor
+from core.models import FlipTargetRecommendation
 from core.market_scanner import ScanOpportunity, ScanStats
 
 
@@ -129,3 +130,42 @@ class TestFlipAdvisor:
         plans = advisor.build_plans_from_opportunities(opportunities, budget=50.0)
 
         assert all(plan.exit_estimate.required_structure["link_count"] <= plan.opportunity.link_count for plan in plans)
+
+    @patch("core.flip_planner.OnDemandScanner")
+    def test_recommend_target_uses_oracle_value(self, mock_scanner_cls):
+        scanner = mock_scanner_cls.return_value
+        scanner.scan_opportunities.return_value = ([], ScanStats(resolved_league="Mirage"))
+        scanner.currency_rates = {"Orb of Fusing": 0.05}
+
+        advisor = FlipAdvisor(league="Mirage")
+
+        class OracleStub:
+            def predict(self, _item):
+                class Result:
+                    predicted_value = 133.0
+                    confidence = 0.81
+                    model_source = "family_model"
+                return Result()
+
+        advisor.predictor = OracleStub()
+        target = advisor._recommend_target(_sample_opportunity(), budget=80.0)
+
+        assert target.expected_value == 133.0
+        assert "oráculo family_model projetou 133.0c" in target.rationale
+
+    @patch("core.flip_planner.OnDemandScanner")
+    def test_trusted_profit_is_strict_profit_times_confidence(self, mock_scanner_cls):
+        scanner = mock_scanner_cls.return_value
+        scanner.scan_opportunities.return_value = ([
+            _sample_opportunity(),
+            _sample_opportunity(item_id="armour-2", listed_price=55.0, link_count=6, market_floor=120.0, market_median=140.0, comparables_count=3),
+        ], ScanStats(resolved_league="Mirage"))
+        scanner.currency_rates = {"Orb of Fusing": 0.05}
+
+        advisor = FlipAdvisor(league="Mirage")
+        plans, _ = advisor.recommend_plans(item_class="Sadist Garb", budget=80.0)
+
+        assert len(plans) >= 1
+        expected = round(plans[0].expected_profit * plans[0].confidence_breakdown.overall_confidence, 1)
+        assert plans[0].trusted_profit == expected
+

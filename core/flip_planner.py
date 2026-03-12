@@ -1,106 +1,15 @@
-from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
+from core.item_normalizer import NormalizedMarketItem
 from core.market_scanner import OnDemandScanner, ScanOpportunity, ScanStats
-
-
-@dataclass
-class FlipTargetRecommendation:
-    label: str
-    goal_mods: List[str]
-    expected_value: float
-    confidence: float
-    rationale: str
-    requires_suppression: bool = False
-    required_link_count: int = 0
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-@dataclass
-class CraftActionEvaluation:
-    action_type: str
-    action_name: str
-    target_mod: str
-    eligibility: bool
-    failure_reason: str
-    expected_cost: float
-    expected_value_delta: float
-    brick_risk: float
-    confidence_delta: float
-    probability: float
-    expected_value_after_step: float
-    notes: str
-    stop_here: bool = False
-
-    def to_dict(self) -> dict:
-        payload = asdict(self)
-        payload["cost_chaos"] = round(self.expected_cost, 1)
-        return payload
-
-
-@dataclass
-class ExitMarketEstimate:
-    expected_sale_value: float
-    market_floor: float
-    market_median: float
-    comparables_count: int
-    pricing_position: str
-    evidence_strength: str
-    required_structure: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-@dataclass
-class PlanConfidenceBreakdown:
-    base_confidence: float
-    craft_confidence: float
-    exit_confidence: float
-    overall_confidence: float
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-@dataclass
-class CraftPlan:
-    opportunity: ScanOpportunity
-    target: FlipTargetRecommendation
-    steps: List[CraftActionEvaluation]
-    buy_cost: float
-    expected_craft_cost: float
-    expected_sale_value: float
-    expected_profit: float
-    trusted_profit: float
-    plan_confidence: float
-    confidence_breakdown: PlanConfidenceBreakdown
-    exit_estimate: ExitMarketEstimate
-    stop_condition: str
-    plan_explanation: str
-    risk_notes: List[str] = field(default_factory=list)
-    alternatives: List[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "opportunity": self.opportunity.to_dict(),
-            "target": self.target.to_dict(),
-            "steps": [step.to_dict() for step in self.steps],
-            "buy_cost": round(self.buy_cost, 1),
-            "expected_craft_cost": round(self.expected_craft_cost, 1),
-            "expected_sale_value": round(self.expected_sale_value, 1),
-            "expected_profit": round(self.expected_profit, 1),
-            "trusted_profit": round(self.trusted_profit, 1),
-            "plan_confidence": round(self.plan_confidence, 2),
-            "confidence_breakdown": self.confidence_breakdown.to_dict(),
-            "exit_estimate": self.exit_estimate.to_dict(),
-            "stop_condition": self.stop_condition,
-            "plan_explanation": self.plan_explanation,
-            "risk_notes": self.risk_notes,
-            "alternatives": self.alternatives,
-        }
+from core.ml_oracle import PricePredictor
+from core.models import (
+    CraftActionEvaluation,
+    CraftPlan,
+    ExitMarketEstimate,
+    FlipTargetRecommendation,
+    PlanConfidenceBreakdown,
+)
 
 
 class FlipAdvisor:
@@ -109,31 +18,31 @@ class FlipAdvisor:
         "wand_caster": {
             "label": "Caster Wand Flip",
             "goal_mods": ["SpellDamage1", "CastSpeed1", "CritChanceSpells1"],
-            "premium": 70.0,
+
             "rationale": "Wands caster convertem upgrades controlados em margem quando entram abaixo do mercado.",
         },
         "body_armour_defense": {
             "label": "Defensive Armour Flip",
             "goal_mods": ["Life1", "Resist1"],
-            "premium": 65.0,
+
             "rationale": "Body armours precisam de mods plausíveis para a base e saída suportada por mercado comparável.",
         },
         "jewel_cluster": {
             "label": "Jewel Utility Flip",
             "goal_mods": ["Life1", "CritChanceSpells1"],
-            "premium": 40.0,
+
             "rationale": "Jewels e clusters exigem saída consistente, então o planner reduz upside sem evidência.",
         },
         "accessory_generic": {
             "label": "Accessory Fix-Up Flip",
             "goal_mods": ["Life1", "Resist1", "Attributes1"],
-            "premium": 50.0,
+
             "rationale": "Accessories vendem bem quando fecham vida, resist e utilidade sem extrapolar o mercado final.",
         },
         "generic": {
             "label": "Generic Utility Flip",
             "goal_mods": ["Life1", "Resist1"],
-            "premium": 30.0,
+
             "rationale": "Quando não há archetype forte, o planner usa upgrades genéricos e conservadores.",
         },
     }
@@ -146,8 +55,22 @@ class FlipAdvisor:
         "Resist1": {"action_type": "bench_craft", "action_name": "Bench craft resistance", "base_cost": 4.0, "probability": 1.0, "value_delta": 16.0, "brick_risk": 0.01, "notes": "Fechamento barato para estabilizar a venda."},
         "Attributes1": {"action_type": "bench_craft", "action_name": "Bench craft attribute", "base_cost": 4.0, "probability": 1.0, "value_delta": 12.0, "brick_risk": 0.01, "notes": "Ajuste barato para melhorar a liquidez do item."},
     }
+    _MOD_TEXT_BY_TOKEN: Dict[str, str] = {
+        "SpellDamage1": "Adds high spell damage",
+        "CastSpeed1": "Adds cast speed",
+        "CritChanceSpells1": "Adds spell critical strike chance",
+        "Life1": "+# to maximum Life",
+        "SpellSuppress1": "+# chance to Suppress Spell Damage",
+        "Resist1": "+#% to Elemental Resistances",
+        "Attributes1": "+# to all Attributes",
+        "Mana1": "+# to maximum Mana",
+    }
+    _PREFIX_MODS = {"SpellDamage1", "Life1", "Mana1", "SpellDamage", "Life", "Mana"}
+    _SUFFIX_MODS = {"CastSpeed1", "CritChanceSpells1", "SpellSuppress1", "Resist1", "Attributes1", "CastSpeed", "CritChanceSpells", "SpellSuppress", "Resist", "Attributes"}
+
 
     def __init__(self, league: str = "auto"):
+        self.predictor = PricePredictor()
         self.scanner = OnDemandScanner(league=league)
 
     def recommend_plans(self, item_class: str = "", ilvl_min: int = 1, rarity: str = "rare", max_items: int = 30, min_profit: float = 0.0, min_listed_price: float = 0.0, anti_fix: bool = True, safe_buy: bool = False, stale_hours: float = 48.0, budget: float = 150.0, top_plans: int = 3) -> Tuple[List[CraftPlan], ScanStats]:
@@ -199,7 +122,7 @@ class FlipAdvisor:
         stage_b_ok, stage_b_reasons = self._passes_stage_b(opportunity, target, steps, exit_estimate, confidence_breakdown, expected_profit, budget)
         if not stage_b_ok:
             return None
-        trusted_profit = round(max(expected_profit, 0.0) * confidence_breakdown.overall_confidence, 1)
+        trusted_profit = round(expected_profit * confidence_breakdown.overall_confidence, 1)
         self._mark_stop_point(opportunity, steps, expected_profit)
         stop_condition = self._build_stop_condition(opportunity, steps, expected_profit)
         risk_notes = list(dict.fromkeys(opportunity.risk_flags + stage_a_reasons + stage_b_reasons))
@@ -212,12 +135,14 @@ class FlipAdvisor:
 
     def _recommend_target(self, opportunity: ScanOpportunity, budget: float | None = None) -> FlipTargetRecommendation:
         profile = self._FAMILY_PROFILES.get(opportunity.item_family, self._FAMILY_PROFILES["generic"])
-        market_anchor = max(opportunity.market_median, opportunity.market_floor, opportunity.listed_price)
         if opportunity.item_family == "body_armour_defense":
             suppression_eligible = self._suppression_eligible(opportunity)
             goal_mods = ["Life1", "Resist1"]
             label = "Defensive Armour Flip"
-            rationale_bits = [f"Base {opportunity.base_type} ({self._defence_profile(opportunity)}/{self._attribute_profile(opportunity)})", f"{self._link_count(opportunity)}L atual"]
+            rationale_bits = [
+                f"Base {opportunity.base_type} ({self._defence_profile(opportunity)}/{self._attribute_profile(opportunity)})",
+                f"{self._link_count(opportunity)}L atual",
+            ]
             suppression_ev_cost = float(self._ACTION_CATALOG["SpellSuppress1"]["base_cost"]) / max(float(self._ACTION_CATALOG["SpellSuppress1"]["probability"]), 0.05)
             allow_suppression = suppression_eligible and opportunity.ilvl >= 84 and (budget is None or suppression_ev_cost <= (budget * 0.6))
             if allow_suppression:
@@ -226,16 +151,18 @@ class FlipAdvisor:
                 rationale_bits.append("base pode rolar Spell Suppression e o orçamento comporta esse passo")
             else:
                 rationale_bits.append("planner não exige suppression nesta base ou neste orçamento")
-            confidence = self._clamp((opportunity.ml_confidence * 0.65) + (0.08 if opportunity.comparables_count >= 3 else -0.02) - (0.05 if opportunity.low_ilvl_context else 0.0), 0.35, 0.88)
-            return FlipTargetRecommendation(label=label, goal_mods=goal_mods, expected_value=round(market_anchor + (18.0 * len(goal_mods)), 1), confidence=round(confidence, 2), rationale=". ".join(rationale_bits) + ".", requires_suppression=("SpellSuppress1" in goal_mods), required_link_count=self._link_count(opportunity))
-        missing_count = sum(1 for mod in profile["goal_mods"] if mod not in opportunity.mod_tokens)
-        valuation_value = opportunity.valuation_result.get("predicted_value", opportunity.ml_value)
-        expected_value = round(max(market_anchor + (missing_count * 18.0), valuation_value + float(profile["premium"])), 1)
-        confidence = self._clamp(opportunity.ml_confidence + (0.04 if opportunity.comparables_count >= 3 else -0.03) - (missing_count * 0.05), 0.35, 0.9)
+            oracle_result = self.predictor.predict(self._simulate_target_item(opportunity, goal_mods=goal_mods))
+            confidence = self._clamp((oracle_result.confidence * 0.6) + (opportunity.ml_confidence * 0.25) + (0.08 if opportunity.comparables_count >= 3 else -0.02) - (0.05 if opportunity.low_ilvl_context else 0.0), 0.35, 0.9)
+            rationale_bits.append(f"oráculo {oracle_result.model_source} projetou {oracle_result.predicted_value:.1f}c para a base-alvo")
+            return FlipTargetRecommendation(label=label, goal_mods=goal_mods, expected_value=round(oracle_result.predicted_value, 1), confidence=round(confidence, 2), rationale=". ".join(rationale_bits) + ".", requires_suppression=("SpellSuppress1" in goal_mods), required_link_count=self._link_count(opportunity))
+        goal_mods = list(profile["goal_mods"])
+        oracle_result = self.predictor.predict(self._simulate_target_item(opportunity, goal_mods=goal_mods))
+        confidence = self._clamp((oracle_result.confidence * 0.55) + (opportunity.ml_confidence * 0.25) + (0.04 if opportunity.comparables_count >= 3 else -0.03), 0.35, 0.9)
         rationale = str(profile["rationale"])
         if opportunity.market_median > 0:
             rationale += f" Mediana local observada: {opportunity.market_median:.1f}c."
-        return FlipTargetRecommendation(label=str(profile["label"]), goal_mods=list(profile["goal_mods"]), expected_value=expected_value, confidence=round(confidence, 2), rationale=rationale)
+        rationale += f" Oráculo {oracle_result.model_source} projeta {oracle_result.predicted_value:.1f}c para o alvo sintético."
+        return FlipTargetRecommendation(label=str(profile["label"]), goal_mods=goal_mods, expected_value=round(oracle_result.predicted_value, 1), confidence=round(confidence, 2), rationale=rationale)
 
     def _passes_stage_a(self, opportunity: ScanOpportunity, target: FlipTargetRecommendation, budget: float) -> Tuple[bool, List[str]]:
         reasons: List[str] = []
@@ -310,7 +237,6 @@ class FlipAdvisor:
         )
 
     def _build_exit_estimate(self, opportunity: ScanOpportunity, target: FlipTargetRecommendation, steps: List[CraftActionEvaluation], market_index: Dict[tuple[str, str, int, str], List[float]], budget: float, expected_craft_cost: float) -> ExitMarketEstimate | None:
-        step_delta = sum(step.expected_value_delta for step in steps if step.eligibility)
         link_options = [self._link_count(opportunity)]
         if opportunity.item_family == "body_armour_defense" and self._link_count(opportunity) < 6:
             link_options.append(6)
@@ -332,53 +258,53 @@ class FlipAdvisor:
                 market_floor = opportunity.market_floor
                 market_median = opportunity.market_median
                 market_spread = opportunity.market_spread
-            evidence_strength = self._evidence_strength(comparables_count)
             if link_count > self._link_count(opportunity) and self._six_link_cost_chaos() > budget:
                 continue
+            synthetic_item = self._simulate_target_item(opportunity, goal_mods=target.goal_mods, link_count=link_count)
+            oracle_result = self.predictor.predict(synthetic_item)
+            evidence_strength = self._evidence_strength(comparables_count)
             if comparables_count >= 3 and market_median > 0:
-                base_anchor = (market_median * 0.65) + (opportunity.ml_value * 0.35)
+                expected_sale_value = (market_median * 0.6) + (oracle_result.predicted_value * 0.4)
             elif comparables_count >= 1 and market_median > 0:
-                base_anchor = (market_median * 0.55) + (min(opportunity.ml_value, market_median * 1.1) * 0.45)
+                expected_sale_value = (market_floor * 0.25) + (market_median * 0.4) + (min(oracle_result.predicted_value, market_median * 1.1) * 0.35)
+            elif market_floor > 0:
+                expected_sale_value = (market_floor * 0.55) + (min(oracle_result.predicted_value, max(market_floor * 1.15, market_floor + 10.0)) * 0.45)
             else:
-                base_anchor = min(opportunity.ml_value, max(opportunity.market_median, opportunity.market_floor, opportunity.ml_value))
-            expected_sale_value = base_anchor + step_delta
-            if link_count > self._link_count(opportunity) and market_median > 0:
-                expected_sale_value = max(expected_sale_value, market_median)
-            if opportunity.valuation_result.get("model_source") == "family_fallback" and comparables_count < 2:
-                expected_sale_value = min(expected_sale_value, max(market_floor, opportunity.market_floor, opportunity.listed_price) + step_delta + 15.0)
+                if oracle_result.model_source == "family_fallback":
+                    continue
+                expected_sale_value = oracle_result.predicted_value
             if market_median > 0:
-                expected_sale_value = min(expected_sale_value, max(market_median * 1.12, market_floor + max(market_spread * 0.4, 20.0)))
+                expected_sale_value = min(expected_sale_value, max(market_median * 1.1, market_floor + max(market_spread * 0.35, 10.0)))
                 expected_sale_value = max(expected_sale_value, market_floor)
             pricing_position = self._pricing_position(expected_sale_value, market_floor, market_median, market_spread)
-            exit_estimate = ExitMarketEstimate(expected_sale_value=round(expected_sale_value, 1), market_floor=round(market_floor, 1), market_median=round(market_median, 1), comparables_count=comparables_count, pricing_position=pricing_position, evidence_strength=evidence_strength, required_structure={"link_count": link_count, "defence_profile": self._defence_profile(opportunity), "base_type": opportunity.base_type})
+            exit_estimate = ExitMarketEstimate(expected_sale_value=round(expected_sale_value, 1), market_floor=round(market_floor, 1), market_median=round(market_median, 1), comparables_count=comparables_count, pricing_position=pricing_position, evidence_strength=evidence_strength, oracle_confidence=round(oracle_result.confidence, 2), oracle_model_source=oracle_result.model_source, required_structure={"link_count": link_count, "defence_profile": self._defence_profile(opportunity), "base_type": opportunity.base_type})
             linking_cost = self._six_link_cost_chaos() if link_count > self._link_count(opportunity) else 0.0
             support_weight = {"strong": 0.85, "moderate": 0.68, "weak": 0.45}[evidence_strength]
-            supported_profit = (exit_estimate.expected_sale_value - opportunity.listed_price - expected_craft_cost - linking_cost) * support_weight
+            supported_profit = (exit_estimate.expected_sale_value - opportunity.listed_price - expected_craft_cost - linking_cost) * support_weight * max(exit_estimate.oracle_confidence, 0.25)
             if best_candidate is None or supported_profit > best_candidate[0]:
                 best_candidate = (supported_profit, exit_estimate)
         return best_candidate[1] if best_candidate is not None else None
 
     def _build_confidence_breakdown(self, opportunity: ScanOpportunity, steps: List[CraftActionEvaluation], exit_estimate: ExitMarketEstimate, target: FlipTargetRecommendation, budget: float) -> PlanConfidenceBreakdown:
-        base_confidence = self._clamp((opportunity.ml_confidence * 0.6) + (0.15 if opportunity.pricing_position == "below_floor" else 0.0) + (0.08 if opportunity.comparables_count >= 3 else -0.05) - (0.1 if opportunity.low_ilvl_context and not opportunity.twink_override else 0.0), 0.2, 0.95)
+        base_confidence = self._clamp((opportunity.ml_confidence * 0.55) + (target.confidence * 0.2) + (0.15 if opportunity.pricing_position == "below_floor" else 0.0) + (0.08 if opportunity.comparables_count >= 3 else -0.05) - (0.1 if opportunity.low_ilvl_context and not opportunity.twink_override else 0.0), 0.2, 0.95)
         if target.requires_suppression and not self._suppression_eligible(opportunity):
             craft_confidence = 0.0
         elif any(not step.eligibility for step in steps):
             craft_confidence = 0.0
         else:
             craft_confidence = self._clamp((sum(step.probability for step in steps) / max(len(steps), 1)) - (sum(step.brick_risk for step in steps) * 0.08) - (0.12 if any(step.action_type == "socket_linking" and step.expected_cost > budget * 0.75 for step in steps) else 0.0), 0.0, 0.9)
-        exit_base = {"strong": 0.82, "moderate": 0.66, "weak": 0.44}[exit_estimate.evidence_strength]
-        exit_confidence = exit_base
+        evidence_base = {"strong": 0.82, "moderate": 0.66, "weak": 0.44}[exit_estimate.evidence_strength]
+        exit_confidence = evidence_base + (exit_estimate.oracle_confidence * 0.18)
         if exit_estimate.comparables_count < 2:
             exit_confidence -= 0.12
-        if opportunity.valuation_result.get("model_source") == "family_fallback":
+        if exit_estimate.oracle_model_source == "family_fallback":
             exit_confidence -= 0.08
         if exit_estimate.pricing_position == "outlier":
             exit_confidence -= 0.12
         if exit_estimate.required_structure.get("link_count", self._link_count(opportunity)) > self._link_count(opportunity):
             exit_confidence -= 0.08
         exit_confidence = self._clamp(exit_confidence, 0.0, 0.9)
-        overall_confidence = self._clamp((base_confidence * 0.3) + (craft_confidence * 0.3) + (exit_confidence * 0.4), 0.0, 0.92)
-        return PlanConfidenceBreakdown(base_confidence=round(base_confidence, 2), craft_confidence=round(craft_confidence, 2), exit_confidence=round(exit_confidence, 2), overall_confidence=round(overall_confidence, 2))
+        return PlanConfidenceBreakdown.compose(base_confidence=base_confidence, craft_confidence=craft_confidence, exit_confidence=exit_confidence)
 
     def _passes_stage_b(self, opportunity: ScanOpportunity, target: FlipTargetRecommendation, steps: List[CraftActionEvaluation], exit_estimate: ExitMarketEstimate, confidence_breakdown: PlanConfidenceBreakdown, expected_profit: float, budget: float) -> Tuple[bool, List[str]]:
         reasons: List[str] = []
@@ -388,7 +314,7 @@ class FlipAdvisor:
             reasons.append("craft_ineligible")
         if confidence_breakdown.overall_confidence < 0.45:
             reasons.append("confidence_too_low")
-        if opportunity.valuation_result.get("model_source") == "family_fallback" and exit_estimate.comparables_count < 2:
+        if exit_estimate.oracle_model_source == "family_fallback" and exit_estimate.comparables_count < 2:
             reasons.append("fallback_exit_low_evidence")
         if exit_estimate.pricing_position == "outlier" and exit_estimate.comparables_count < 3:
             reasons.append("exit_outlier_low_evidence")
@@ -435,9 +361,8 @@ class FlipAdvisor:
         if required_links > self._link_count(opportunity):
             bits.append(f"Saída exige {required_links}L; custo de linking foi embutido no plano.")
         bits.append(f"Saída validada por mercado: piso {exit_estimate.market_floor:.1f}c, mediana {exit_estimate.market_median:.1f}c, comparáveis {exit_estimate.comparables_count}, evidência {exit_estimate.evidence_strength}.")
+        bits.append(f"Validação de saída via oráculo: {exit_estimate.oracle_model_source} com confiança {exit_estimate.oracle_confidence:.2f}.")
         bits.append(f"Confiança composta: base {confidence_breakdown.base_confidence:.2f}, craft {confidence_breakdown.craft_confidence:.2f}, exit {confidence_breakdown.exit_confidence:.2f}.")
-        if opportunity.valuation_result.get("model_source") == "family_fallback":
-            bits.append("Valuation em fallback só foi aceito porque a saída manteve suporte mínimo de mercado.")
         return " ".join(bits)
 
     def _rebase_step_values(self, opportunity: ScanOpportunity, steps: List[CraftActionEvaluation], final_sale_value: float) -> None:
@@ -453,6 +378,48 @@ class FlipAdvisor:
             share = max(step.expected_value_delta, 0.0) / total_delta
             running_delta += available_delta * share
             step.expected_value_after_step = round(anchor + running_delta, 1)
+
+    def _simulate_target_item(self, opportunity: ScanOpportunity, goal_mods: List[str], link_count: int | None = None) -> NormalizedMarketItem:
+        current_tokens = list(dict.fromkeys(list(opportunity.mod_tokens)))
+        missing_tokens = [mod for mod in goal_mods if mod not in current_tokens]
+        simulated_tokens = list(dict.fromkeys(current_tokens + missing_tokens))
+        explicit_mods = list(opportunity.explicit_mods)
+        for token in missing_tokens:
+            explicit_mods.append(self._MOD_TEXT_BY_TOKEN.get(token, token))
+        prefix_count = min(3, opportunity.prefix_count + sum(1 for token in missing_tokens if token in self._PREFIX_MODS))
+        suffix_count = min(3, opportunity.suffix_count + sum(1 for token in missing_tokens if token in self._SUFFIX_MODS))
+        open_prefixes = max(0, 3 - prefix_count)
+        open_suffixes = max(0, 3 - suffix_count)
+        return NormalizedMarketItem(
+            item_id=opportunity.item_id,
+            base_type=opportunity.base_type,
+            item_family=opportunity.item_family,
+            ilvl=opportunity.ilvl,
+            listed_price=opportunity.listed_price,
+            listing_currency=opportunity.listing_currency,
+            listing_amount=opportunity.listing_amount,
+            seller=opportunity.seller,
+            listed_at=opportunity.indexed_at,
+            whisper=opportunity.whisper,
+            corrupted=opportunity.corrupted,
+            fractured=opportunity.fractured,
+            influences=list(opportunity.influences),
+            explicit_mods=explicit_mods,
+            implicit_mods=list(opportunity.implicit_mods),
+            prefix_count=prefix_count,
+            suffix_count=suffix_count,
+            open_prefixes=open_prefixes,
+            open_suffixes=open_suffixes,
+            mod_tokens=simulated_tokens,
+            tag_tokens=list(opportunity.tag_tokens),
+            numeric_mod_features={},
+            tier_source="none",
+            native_tier_count=0,
+            twink_override=bool(getattr(opportunity, "twink_override", False)),
+            tier_ilvl_mismatch=bool(getattr(opportunity, "tier_ilvl_mismatch", False)),
+            low_ilvl_context=bool(getattr(opportunity, "low_ilvl_context", False)),
+            fractured_low_ilvl_brick=bool(getattr(opportunity, "fractured_low_ilvl_brick", False)),
+        )
 
     def _current_market_anchor(self, opportunity: ScanOpportunity) -> float:
         return max(opportunity.market_floor, opportunity.market_median, opportunity.ml_value)
