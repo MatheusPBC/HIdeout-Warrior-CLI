@@ -66,6 +66,40 @@ def test_ops_cycle_runs_in_sequence_and_emits_metric(monkeypatch, tmp_path) -> N
     )
 
 
+def test_ops_cycle_forwards_oauth_client_credentials(monkeypatch, tmp_path) -> None:
+    captured_miner_kwargs = {}
+
+    def _fake_miner(**kwargs):
+        captured_miner_kwargs.update(kwargs)
+
+    monkeypatch.setattr("scripts.ops_cycle.run_firehose_miner", _fake_miner)
+    monkeypatch.setattr(
+        "scripts.ops_cycle.build_training_snapshot",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "scripts.ops_cycle.train_xgboost_oracle",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "scripts.ops_cycle.append_metric_event",
+        lambda **_kwargs: None,
+    )
+
+    ops_cycle.run(
+        db_path=str(tmp_path / "firehose.db"),
+        snapshot_output_dir=str(tmp_path / "snapshots"),
+        oauth_client_id="client-id",
+        oauth_client_secret="client-secret",
+        oauth_scope="service:psapi",
+        oauth_token_url="https://www.pathofexile.com/oauth/token",
+    )
+
+    assert captured_miner_kwargs["oauth_client_id"] == "client-id"
+    assert captured_miner_kwargs["oauth_client_secret"] == "client-secret"
+    assert captured_miner_kwargs["oauth_scope"] == "service:psapi"
+
+
 def test_ops_cycle_fail_fast_stops_on_first_error(monkeypatch, tmp_path) -> None:
     calls = []
     captured_metric = {}

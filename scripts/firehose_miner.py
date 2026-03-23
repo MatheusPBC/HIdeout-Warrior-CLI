@@ -13,6 +13,21 @@ from rich import print
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.ops_metrics import append_metric_event
+from core.poe_oauth import (
+    DEFAULT_POE_TOKEN_URL,
+    DEFAULT_SERVICE_SCOPE,
+    resolve_service_oauth_token,
+)
+
+
+def _clean_optional_str(
+    value: Optional[str], default: Optional[str] = None
+) -> Optional[str]:
+    if value is None or isinstance(value, typer.models.OptionInfo):
+        return default
+    cleaned = str(value).strip()
+    return cleaned or default
+
 
 PUBLIC_STASH_URL = "https://api.pathofexile.com/public-stash-tabs"
 DEFAULT_USER_AGENT = (
@@ -356,6 +371,26 @@ def run(
         "--oauth-token",
         help="OAuth bearer token (fallback: env POE_OAUTH_TOKEN)",
     ),
+    oauth_client_id: Optional[str] = typer.Option(
+        None,
+        "--oauth-client-id",
+        help="OAuth client id (fallback: env POE_OAUTH_CLIENT_ID/POE_CLIENT_ID)",
+    ),
+    oauth_client_secret: Optional[str] = typer.Option(
+        None,
+        "--oauth-client-secret",
+        help="OAuth client secret (fallback: env POE_OAUTH_CLIENT_SECRET/POE_CLIENT_SECRET)",
+    ),
+    oauth_scope: str = typer.Option(
+        DEFAULT_SERVICE_SCOPE,
+        "--oauth-scope",
+        help="OAuth scope for token resolution",
+    ),
+    oauth_token_url: str = typer.Option(
+        DEFAULT_POE_TOKEN_URL,
+        "--oauth-token-url",
+        help="OAuth token endpoint",
+    ),
     user_agent: str = typer.Option(
         DEFAULT_USER_AGENT,
         "--user-agent",
@@ -375,8 +410,39 @@ def run(
     print(
         f"[cyan]firehose miner iniciado[/cyan] db={db_path} start={current_change_id}"
     )
-    effective_oauth_token = oauth_token or os.getenv("POE_OAUTH_TOKEN")
-    session = _build_session(effective_oauth_token, user_agent=user_agent)
+    effective_oauth_scope = _clean_optional_str(oauth_scope, DEFAULT_SERVICE_SCOPE)
+    effective_oauth_token_url = _clean_optional_str(
+        oauth_token_url,
+        DEFAULT_POE_TOKEN_URL,
+    )
+    effective_user_agent = _clean_optional_str(user_agent, DEFAULT_USER_AGENT)
+    try:
+        resolved_oauth = resolve_service_oauth_token(
+            access_token=oauth_token,
+            client_id=oauth_client_id,
+            client_secret=oauth_client_secret,
+            scope=effective_oauth_scope,
+            token_url=effective_oauth_token_url,
+            user_agent=effective_user_agent,
+        )
+    except ValueError as exc:
+        print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except requests.RequestException as exc:
+        print(f"[red]Falha ao obter token OAuth: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except RuntimeError as exc:
+        print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    effective_oauth_token = resolved_oauth.access_token if resolved_oauth else None
+    if resolved_oauth is not None:
+        print(
+            "[cyan]OAuth resolvido[/cyan] "
+            f"source={resolved_oauth.source} scope={resolved_oauth.scope or effective_oauth_scope}"
+        )
+
+    session = _build_session(effective_oauth_token, user_agent=effective_user_agent)
     total_inserted = 0
     total_duplicates = 0
     fetch_failures = 0
@@ -397,7 +463,8 @@ def run(
                     "Use OAuth token válido com escopo service:psapi.[/red]"
                 )
                 print(
-                    "[yellow]Verifique: 1) token Bearer válido em --oauth-token/POE_OAUTH_TOKEN; "
+                    "[yellow]Verifique: 1) token Bearer válido em --oauth-token/POE_OAUTH_TOKEN "
+                    "ou client credentials em --oauth-client-id/--oauth-client-secret; "
                     "2) escopo service:psapi; 3) uso do host api.pathofexile.com. "
                     "Docs: https://www.pathofexile.com/developer/docs/authorization[/yellow]"
                 )

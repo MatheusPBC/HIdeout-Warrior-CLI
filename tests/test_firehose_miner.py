@@ -13,6 +13,7 @@ from scripts.firehose_miner import (
     parse_price_note,
     update_checkpoint,
 )
+from core.poe_oauth import OAuthAccessToken
 
 
 def test_parse_price_note_supports_known_currencies() -> None:
@@ -156,6 +157,51 @@ def test_run_emits_operational_metric(tmp_path, monkeypatch) -> None:
     assert captured["status"] == "ok"
     assert captured["payload"]["pages_processed"] == 1
     assert "throughput_items_per_sec" in captured["payload"]
+
+
+def test_run_resolves_oauth_via_client_credentials(tmp_path, monkeypatch) -> None:
+    payload = {
+        "next_change_id": "next-1",
+        "stashes": [
+            {
+                "stash": "s1",
+                "league": "Standard",
+                "accountName": "seller",
+                "items": [],
+            }
+        ],
+    }
+    captured = {}
+
+    def _fake_resolve(**kwargs):
+        captured.update(kwargs)
+        return OAuthAccessToken(
+            access_token="generated-token",
+            scope="service:psapi",
+            source="client_credentials",
+        )
+
+    def _fake_fetch(session, *_args, **_kwargs):
+        assert session.headers["Authorization"] == "Bearer generated-token"
+        return payload
+
+    monkeypatch.setattr(
+        "scripts.firehose_miner.resolve_service_oauth_token", _fake_resolve
+    )
+    monkeypatch.setattr("scripts.firehose_miner.fetch_stash_page", _fake_fetch)
+
+    run(
+        db_path=str(tmp_path / "firehose.db"),
+        start_change_id="boot",
+        max_pages=1,
+        sleep_seconds=0.0,
+        oauth_client_id="client-id",
+        oauth_client_secret="client-secret",
+    )
+
+    assert captured["client_id"] == "client-id"
+    assert captured["client_secret"] == "client-secret"
+    assert captured["scope"] == "service:psapi"
 
 
 def test_fetch_stash_page_raises_permission_error_on_oauth_forbidden() -> None:

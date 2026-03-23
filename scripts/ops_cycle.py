@@ -54,6 +54,26 @@ def run(
         "--oauth-token",
         help="OAuth bearer token for firehose miner",
     ),
+    oauth_client_id: Optional[str] = typer.Option(
+        None,
+        "--oauth-client-id",
+        help="OAuth client id for firehose miner",
+    ),
+    oauth_client_secret: Optional[str] = typer.Option(
+        None,
+        "--oauth-client-secret",
+        help="OAuth client secret for firehose miner",
+    ),
+    oauth_scope: str = typer.Option(
+        "service:psapi",
+        "--oauth-scope",
+        help="OAuth scope for firehose miner",
+    ),
+    oauth_token_url: str = typer.Option(
+        "https://www.pathofexile.com/oauth/token",
+        "--oauth-token-url",
+        help="OAuth token endpoint for firehose miner",
+    ),
     max_pages: int = typer.Option(0, "--max-pages", help="Miner max pages"),
     sleep_seconds: float = typer.Option(
         1.5,
@@ -127,6 +147,10 @@ def run(
                 max_pages=max_pages,
                 sleep_seconds=sleep_seconds,
                 oauth_token=_clean_optional_str(oauth_token),
+                oauth_client_id=_clean_optional_str(oauth_client_id),
+                oauth_client_secret=_clean_optional_str(oauth_client_secret),
+                oauth_scope=oauth_scope,
+                oauth_token_url=oauth_token_url,
             ),
         ),
         (
