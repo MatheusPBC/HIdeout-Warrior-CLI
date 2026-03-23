@@ -1,4 +1,5 @@
 from core.poe_oauth import (
+    DEFAULT_OAUTH_USER_AGENT,
     DEFAULT_SERVICE_SCOPE,
     OAuthAccessToken,
     request_client_credentials_token,
@@ -74,6 +75,25 @@ def test_request_client_credentials_token_posts_expected_payload():
         "grant_type": "client_credentials",
         "scope": "service:psapi",
     }
+    assert http_client.calls[0]["headers"]["User-Agent"] == "hideout-warrior-tests"
+
+
+def test_request_client_credentials_token_uses_default_user_agent():
+    http_client = _HttpClient(
+        {
+            "access_token": "svc-token",
+            "token_type": "bearer",
+            "scope": "service:psapi",
+        }
+    )
+
+    request_client_credentials_token(
+        client_id="client-id",
+        client_secret="client-secret",
+        session=http_client,
+    )
+
+    assert http_client.calls[0]["headers"]["User-Agent"] == DEFAULT_OAUTH_USER_AGENT
 
 
 def test_resolve_service_oauth_token_uses_env_client_credentials(monkeypatch):

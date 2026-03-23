@@ -2,6 +2,14 @@
 
 ## 2026-03-11
 
+- Adicionado `core/poe_oauth.py` com resolucao de OAuth de servico para Path of Exile via `client_credentials`, suportando token direto (`POE_OAUTH_TOKEN`) ou geracao on-demand por `client_id`/`client_secret`.
+- Expandido `scripts/firehose_miner.py` para aceitar `--oauth-client-id`, `--oauth-client-secret`, `--oauth-scope` e `--oauth-token-url`, resolvendo token automaticamente e mantendo `User-Agent` identificavel no fluxo de autorizacao.
+- Expandido `scripts/ops_cycle.py` para encaminhar credenciais de OAuth de servico ao `firehose_miner`, permitindo pipeline operacional completo com `service:psapi` sem Bearer manual.
+- Incorporado suporte a `User-Agent` padrao no helper de token OAuth para evitar falhas de autorizacao no endpoint `/oauth/token`.
+- Integrado o commit de `flip-plan` orientado a oracle-backed targets e mantido o planner verde com ajuste em `core/flip_planner.py` para permitir saidas com `6-link` quando houver ancora estrutural de mercado suficiente.
+- Criado `docs/data-platform-roadmap.md` com o plano faseado de evolucao de coleta, qualidade, labels, modelo, scanner e observabilidade para os proximos ciclos.
+- Adicionados testes em `tests/test_poe_oauth.py` e ampliados `tests/test_firehose_miner.py` e `tests/test_ops_cycle.py` para cobrir `client_credentials`; validacao completa executada nesta etapa: `pytest -q` com **101 passed**.
+
 - Endurecido o `flip-plan` em `core/flip_planner.py` com pipeline em dois estagios (`Stage A`/`Stage B`), `trusted_profit`, confianca composta (`PlanConfidenceBreakdown`) e `plan_explanation` auditavel por plano.
 - Adicionada validacao estrutural para `body_armour`: alvos com `Spell Suppression` agora so passam em bases com componente `Evasion`/`Dex`, e o planner bloqueia rotas mecanicamente impossiveis em vez de assumir craft valido.
 - Incorporado `ExitMarketEstimate` no planner com consenso entre valuation e mercado de saida, incluindo `evidence_strength`, estrutura exigida e fallback conservador quando a evidencia e fraca.

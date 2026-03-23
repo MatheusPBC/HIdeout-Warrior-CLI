@@ -8,6 +8,9 @@ import requests
 
 DEFAULT_POE_TOKEN_URL = "https://www.pathofexile.com/oauth/token"
 DEFAULT_SERVICE_SCOPE = "service:psapi"
+DEFAULT_OAUTH_USER_AGENT = (
+    "OAuth hideout-warrior-cli/1.0.0 (contact: hideout-warrior-cli@local)"
+)
 
 
 @dataclass(frozen=True)
@@ -55,8 +58,7 @@ def request_client_credentials_token(
 ) -> OAuthAccessToken:
     http_client = session or requests
     headers = {"Accept": "application/json"}
-    if user_agent:
-        headers["User-Agent"] = user_agent
+    headers["User-Agent"] = user_agent or DEFAULT_OAUTH_USER_AGENT
 
     response = http_client.post(
         token_url,
