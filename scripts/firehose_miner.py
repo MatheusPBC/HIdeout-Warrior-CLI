@@ -3,6 +3,7 @@ import sys
 import json
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -27,6 +28,32 @@ def _clean_optional_str(
         return default
     cleaned = str(value).strip()
     return cleaned or default
+
+
+def _utc_now_iso() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    existing_columns = {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name in existing_columns:
+        return
+    conn.execute(
+        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+    )
 
 
 PUBLIC_STASH_URL = "https://api.pathofexile.com/public-stash-tabs"
@@ -147,6 +174,9 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             price_currency TEXT NOT NULL,
             price_chaos REAL NOT NULL,
             raw_item_json TEXT NOT NULL,
+            collected_at TEXT,
+            oauth_source TEXT,
+            oauth_scope TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(change_id, item_id)
         )
@@ -164,6 +194,9 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_column(conn, "stash_events", "collected_at", "TEXT")
+    _ensure_column(conn, "stash_events", "oauth_source", "TEXT")
+    _ensure_column(conn, "stash_events", "oauth_scope", "TEXT")
     conn.commit()
 
 
@@ -279,9 +312,16 @@ def ingest_stash_page(
     conn: sqlite3.Connection,
     payload: Dict[str, Any],
     change_id: str,
+    *,
+    collected_at: Optional[str] = None,
+    oauth_source: Optional[str] = None,
+    oauth_scope: Optional[str] = None,
 ) -> Tuple[int, int]:
     inserted = 0
     duplicates = 0
+    effective_collected_at = collected_at or _utc_now_iso()
+    effective_oauth_source = str(oauth_source or "")
+    effective_oauth_scope = str(oauth_scope or "")
 
     stashes = payload.get("stashes", [])
     with conn:
@@ -322,9 +362,12 @@ def ingest_stash_page(
                         price_amount,
                         price_currency,
                         price_chaos,
-                        raw_item_json
+                        raw_item_json,
+                        collected_at,
+                        oauth_source,
+                        oauth_scope
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         change_id,
@@ -341,6 +384,9 @@ def ingest_stash_page(
                         currency,
                         float(price_chaos),
                         json.dumps(item, ensure_ascii=True, separators=(",", ":")),
+                        effective_collected_at,
+                        effective_oauth_source,
+                        effective_oauth_scope,
                     ),
                 )
                 if cur.rowcount == 1:
@@ -416,6 +462,12 @@ def run(
         DEFAULT_POE_TOKEN_URL,
     )
     effective_user_agent = _clean_optional_str(user_agent, DEFAULT_USER_AGENT)
+    if effective_oauth_scope is None:
+        effective_oauth_scope = DEFAULT_SERVICE_SCOPE
+    if effective_oauth_token_url is None:
+        effective_oauth_token_url = DEFAULT_POE_TOKEN_URL
+    if effective_user_agent is None:
+        effective_user_agent = DEFAULT_USER_AGENT
     try:
         resolved_oauth = resolve_service_oauth_token(
             access_token=oauth_token,
@@ -485,7 +537,14 @@ def run(
 
             effective_change_id = current_change_id or "__bootstrap__"
             inserted, duplicates = ingest_stash_page(
-                conn, response_payload, effective_change_id
+                conn,
+                response_payload,
+                effective_change_id,
+                collected_at=_utc_now_iso(),
+                oauth_source=(resolved_oauth.source if resolved_oauth else None),
+                oauth_scope=(
+                    resolved_oauth.scope if resolved_oauth else effective_oauth_scope
+                ),
             )
 
             # checkpoint apenas depois do lote persistido com sucesso.

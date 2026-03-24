@@ -903,7 +903,7 @@ def train_xgboost_oracle(
     items_per_base: int = 500,
     source: str = "api",
     sqlite_path: str = "data/firehose.db",
-    parquet_path: str = "data/firehose.parquet",
+    parquet_path: str = "data/training_snapshots/gold",
     promotion_max_rmse_ratio: float = 1.0,
     promotion_min_abs_improvement: float = 0.0,
     registry_path: str = "data/model_registry/registry.json",
@@ -1018,7 +1018,9 @@ if __name__ == "__main__":
             "data/firehose.db", "--sqlite-path", help="SQLite source path"
         ),
         parquet_path: str = typer.Option(
-            "data/firehose.parquet", "--parquet-path", help="Parquet source path"
+            "data/training_snapshots/gold",
+            "--parquet-path",
+            help="Parquet source path (file or partitioned directory)",
         ),
         promotion_max_rmse_ratio: float = typer.Option(
             1.0,

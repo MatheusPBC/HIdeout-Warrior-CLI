@@ -18,6 +18,75 @@ O sistema opera de maneira **estrita e sob demanda**, garantindo conformidade to
 
 ---
 
+## Pipeline de Dados de Mercado
+
+O pipeline de mercado agora deve ser entendido em camadas explícitas:
+
+### Raw
+
+- `stash_events`: observações brutas da Public Stash API;
+- `trade_bucket_events`: observações brutas da Trade API por buckets.
+
+Essas tabelas preservam o payload bruto do item e os metadados operacionais mínimos de coleta.
+
+### Bronze
+
+Camada canônica de observações reconciliadas, produzida por `scripts/build_training_snapshot.py`.
+
+Contrato principal por observação:
+
+- `item_id`
+- `league`
+- `source`
+- `source_table`
+- `indexed_at`
+- `collected_at`
+- `first_seen_at`
+- `last_seen_at`
+- `seen_count`
+- `source_count`
+- `listing_age_seconds`
+- `freshness_band`
+- `price_amount`
+- `price_currency`
+- `price_chaos`
+- `raw_item_json`
+- `query_context`
+
+Quando o mesmo item aparece em mais de uma fonte dentro da mesma liga, a reconciliação promove a observação para `source=both`, preservando também `source_table` para rastreabilidade do evento bruto.
+
+### Silver
+
+Camada normalizada por item, já compatível com o normalizador e com o parser de features.
+
+Além dos atributos derivados do item, a camada Silver preserva contexto operacional relevante da Bronze, incluindo:
+
+- `source`
+- `source_count`
+- `seen_count`
+- `first_seen_at`
+- `last_seen_at`
+- `listing_age_seconds`
+- `freshness_band`
+
+### Gold
+
+Camada final orientada a treino e avaliação. Ela mantém as features do item e carrega também os sinais estruturais de frescor/origem necessários para evoluir os próximos estágios de qualidade, labeling e modelagem.
+
+### Fluxo resumido
+
+`raw -> bronze -> silver -> gold -> train_oracle -> market_scanner`
+
+Esse fluxo existe para separar claramente:
+
+- ingestão bruta;
+- reconciliação de observações;
+- normalização de item;
+- dataset de treino;
+- uso operacional no scanner.
+
+---
+
 ## Módulos e Componentes
 
 ### 1. `cli.py` (Command Line Interface)

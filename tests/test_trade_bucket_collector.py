@@ -1,4 +1,5 @@
 import sqlite3
+from typing import Any, cast
 
 from scripts.trade_bucket_collector import (
     build_trade_query,
@@ -24,6 +25,12 @@ def _sample_row() -> dict:
         "price_chaos": 12.0,
         "raw_item_json": '{"id":"item-1"}',
         "collected_at": "2026-03-11T10:01:00Z",
+        "scan_profile": "default_bucket_scan",
+        "query_shape": "online:type=Imbued Wand:price_chaos=1-15:sort=indexed_desc",
+        "bucket_label": "1-15",
+        "listing_age_seconds": 60.0,
+        "search_batch": 1,
+        "fetch_batch": 1,
     }
 
 
@@ -40,6 +47,11 @@ def test_trade_bucket_schema_and_dedupe_are_idempotent() -> None:
     assert inserted_2 == 0
     assert duplicates_2 == 1
     assert count == 1
+
+    row = conn.execute(
+        "SELECT scan_profile, bucket_label, listing_age_seconds, search_batch, fetch_batch FROM trade_bucket_events"
+    ).fetchone()
+    assert row == ("default_bucket_scan", "1-15", 60.0, 1, 1)
 
 
 def test_build_trade_query_uses_bucket_and_indexed_desc_sort() -> None:
@@ -87,7 +99,7 @@ def test_collect_trade_bucket_respects_bucket_and_run_quotas() -> None:
 
     fake_client = _FakeClient()
     totals = collect_trade_bucket_events(
-        client=fake_client,
+        client=cast(Any, fake_client),
         conn=conn,
         league="Standard",
         base_types=["Imbued Wand", "Opal Ring"],
@@ -105,3 +117,14 @@ def test_collect_trade_bucket_respects_bucket_and_run_quotas() -> None:
     assert totals["fetches"] == 3
     assert totals["inserted"] == 12
     assert inserted_count == 12
+
+    row = conn.execute(
+        "SELECT scan_profile, query_shape, bucket_label, listing_age_seconds, search_batch, fetch_batch FROM trade_bucket_events ORDER BY id LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "default_bucket_scan"
+    assert "type=Imbued Wand" in row[1]
+    assert row[2] == "1-15"
+    assert row[3] >= 0.0
+    assert row[4] == 1
+    assert row[5] == 1

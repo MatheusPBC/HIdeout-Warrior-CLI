@@ -90,6 +90,32 @@ def _load_metrics(metrics_dir: Path) -> Dict[str, Dict[str, Any]]:
     return report
 
 
+def _load_snapshot_metrics(metrics_dir: Path) -> Dict[str, Any]:
+    """Carrega métricas de snapshot mais recentes."""
+    snapshot_files = sorted(metrics_dir.glob("snapshot_*.json"))
+    if not snapshot_files:
+        return {}
+
+    latest = snapshot_files[-1]
+    try:
+        payload = json.loads(latest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    return {
+        "snapshot_date": payload.get("snapshot_date"),
+        "run_id": payload.get("run_id"),
+        "ts_utc": payload.get("ts_utc"),
+        "bronze": payload.get("bronze", {}),
+        "silver": payload.get("silver", {}),
+        "gold": payload.get("gold", {}),
+        "source_file": str(latest),
+    }
+
+
 def _load_registry_state(registry_path: Path) -> Dict[str, Any]:
     if not registry_path.exists():
         return {}
@@ -139,6 +165,7 @@ def build(
 
     components = _load_metrics(metrics_root)
     active_registry_by_family = _load_registry_state(registry_file)
+    snapshot_metrics = _load_snapshot_metrics(metrics_root)
 
     report_payload = {
         "generated_at_utc": datetime.now(timezone.utc)
@@ -148,6 +175,7 @@ def build(
         "metrics": {
             "components": components,
             "components_count": len(components),
+            "snapshot": snapshot_metrics,
         },
         "registry": {
             "path": str(registry_file),
@@ -171,6 +199,15 @@ def build(
         print(
             f"- {component}: runs={stats['runs']} ok={stats['ok']} "
             f"error={stats['error']} error_rate={stats['error_rate']:.1%}"
+        )
+
+    if snapshot_metrics:
+        bronze = snapshot_metrics.get("bronze", {})
+        silver = snapshot_metrics.get("silver", {})
+        gold = snapshot_metrics.get("gold", {})
+        print(
+            f"[cyan]Snapshot metrics[/cyan] date={snapshot_metrics.get('snapshot_date', 'N/A')} "
+            f"bronze={bronze.get('rows', 0)} silver={silver.get('rows', 0)} gold={gold.get('rows', 0)}"
         )
 
 

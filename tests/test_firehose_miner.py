@@ -71,6 +71,51 @@ def test_ingest_is_idempotent_by_change_and_item_id() -> None:
     assert rows == 1
 
 
+def test_ingest_persists_collection_and_oauth_metadata() -> None:
+    conn = sqlite3.connect(":memory:")
+    initialize_database(conn)
+    payload = {
+        "stashes": [
+            {
+                "stash": "s1",
+                "league": "Standard",
+                "accountName": "seller",
+                "items": [
+                    {
+                        "id": "item-meta-1",
+                        "frameType": 2,
+                        "note": "~price 9 chaos",
+                        "baseType": "Imbued Wand",
+                        "name": "",
+                        "ilvl": 84,
+                        "indexed": "2026-03-11T10:00:00Z",
+                    }
+                ],
+            }
+        ]
+    }
+
+    ingest_stash_page(
+        conn,
+        payload,
+        change_id="change-meta",
+        collected_at="2026-03-11T10:01:00Z",
+        oauth_source="client_credentials",
+        oauth_scope="service:psapi",
+    )
+
+    row = conn.execute(
+        "SELECT collected_at, oauth_source, oauth_scope FROM stash_events WHERE item_id = ?",
+        ("item-meta-1",),
+    ).fetchone()
+
+    assert row == (
+        "2026-03-11T10:01:00Z",
+        "client_credentials",
+        "service:psapi",
+    )
+
+
 def test_checkpoint_updates_after_success() -> None:
     conn = sqlite3.connect(":memory:")
     initialize_database(conn)

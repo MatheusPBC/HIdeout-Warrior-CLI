@@ -34,6 +34,7 @@ DEFAULT_BASE_TYPES: Tuple[str, ...] = (
 
 DEFAULT_MAX_SEARCHES_PER_RUN = 60
 DEFAULT_MAX_FETCHES_PER_RUN = 300
+DEFAULT_SCAN_PROFILE = "default_bucket_scan"
 
 
 def _utc_now_iso() -> str:
@@ -42,6 +43,50 @@ def _utc_now_iso() -> str:
         .replace(microsecond=0)
         .isoformat()
         .replace("+00:00", "Z")
+    )
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    existing_columns = {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name in existing_columns:
+        return
+    conn.execute(
+        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+    )
+
+
+def _parse_iso_timestamp(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _listing_age_seconds(indexed: str, collected_at: str) -> Optional[float]:
+    indexed_at = _parse_iso_timestamp(indexed)
+    collected_at_dt = _parse_iso_timestamp(collected_at)
+    if indexed_at is None or collected_at_dt is None:
+        return None
+    age_seconds = (collected_at_dt - indexed_at).total_seconds()
+    if age_seconds < 0:
+        return 0.0
+    return round(age_seconds, 3)
+
+
+def _build_query_shape(base_type: str, bucket_min: int, bucket_max: int) -> str:
+    return (
+        f"online:type={base_type}:price_chaos={int(bucket_min)}-{int(bucket_max)}:"
+        "sort=indexed_desc"
     )
 
 
@@ -107,10 +152,22 @@ def initialize_trade_bucket_database(conn: sqlite3.Connection) -> None:
             price_chaos REAL NOT NULL,
             raw_item_json TEXT NOT NULL,
             collected_at TEXT NOT NULL,
+            scan_profile TEXT,
+            query_shape TEXT,
+            bucket_label TEXT,
+            listing_age_seconds REAL,
+            search_batch INTEGER,
+            fetch_batch INTEGER,
             UNIQUE(league, item_id, indexed, price_chaos)
         )
         """
     )
+    _ensure_column(conn, "trade_bucket_events", "scan_profile", "TEXT")
+    _ensure_column(conn, "trade_bucket_events", "query_shape", "TEXT")
+    _ensure_column(conn, "trade_bucket_events", "bucket_label", "TEXT")
+    _ensure_column(conn, "trade_bucket_events", "listing_age_seconds", "REAL")
+    _ensure_column(conn, "trade_bucket_events", "search_batch", "INTEGER")
+    _ensure_column(conn, "trade_bucket_events", "fetch_batch", "INTEGER")
     conn.commit()
 
 
@@ -138,8 +195,14 @@ def ingest_trade_bucket_rows(
                     price_currency,
                     price_chaos,
                     raw_item_json,
-                    collected_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    collected_at,
+                    scan_profile,
+                    query_shape,
+                    bucket_label,
+                    listing_age_seconds,
+                    search_batch,
+                    fetch_batch
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["run_id"],
@@ -156,6 +219,12 @@ def ingest_trade_bucket_rows(
                     row["price_chaos"],
                     row["raw_item_json"],
                     row["collected_at"],
+                    row.get("scan_profile", DEFAULT_SCAN_PROFILE),
+                    row.get("query_shape", ""),
+                    row.get("bucket_label", ""),
+                    row.get("listing_age_seconds"),
+                    row.get("search_batch", 0),
+                    row.get("fetch_batch", 0),
                 ),
             )
             if cur.rowcount == 1:
@@ -175,6 +244,11 @@ def _event_from_trade_detail(
     bucket_max: int,
     query_id: str,
     collected_at: str,
+    scan_profile: str,
+    query_shape: str,
+    bucket_label: str,
+    search_batch: int,
+    fetch_batch: int,
 ) -> Optional[Dict[str, Any]]:
     listing = detail.get("listing") or {}
     item_payload = detail.get("item") or {}
@@ -214,6 +288,12 @@ def _event_from_trade_detail(
             item_payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True
         ),
         "collected_at": collected_at,
+        "scan_profile": scan_profile,
+        "query_shape": query_shape,
+        "bucket_label": bucket_label,
+        "listing_age_seconds": _listing_age_seconds(indexed, collected_at),
+        "search_batch": int(search_batch),
+        "fetch_batch": int(fetch_batch),
     }
 
 
@@ -252,10 +332,13 @@ def collect_trade_bucket_events(
             totals["buckets_processed"] += 1
             collected_at = _utc_now_iso()
             query = build_trade_query(base_type, bucket_min, bucket_max)
+            query_shape = _build_query_shape(base_type, bucket_min, bucket_max)
+            bucket_label = f"{int(bucket_min)}-{int(bucket_max)}"
 
             try:
                 query_id, result_ids = client.search_items(query)
                 totals["searches"] += 1
+                search_batch = totals["searches"]
                 if not query_id or not result_ids:
                     continue
 
@@ -267,6 +350,7 @@ def collect_trade_bucket_events(
                         break
                     details = client.fetch_item_details(batch, query_id)
                     totals["fetches"] += 1
+                    fetch_batch = totals["fetches"]
 
                     for detail in details:
                         event = _event_from_trade_detail(
@@ -278,6 +362,11 @@ def collect_trade_bucket_events(
                             bucket_max=bucket_max,
                             query_id=query_id,
                             collected_at=collected_at,
+                            scan_profile=DEFAULT_SCAN_PROFILE,
+                            query_shape=query_shape,
+                            bucket_label=bucket_label,
+                            search_batch=search_batch,
+                            fetch_batch=fetch_batch,
                         )
                         if event is None:
                             continue

@@ -269,6 +269,65 @@ def test_fetch_training_data_from_parquet_accepts_partitioned_directory(
     assert result.equals(expected)
 
 
+def test_train_oracle_parquet_default_is_gold_training_snapshots() -> None:
+    """
+    Verify parquet_path default matches plan BLOCO 1 expectation: data/training_snapshots/gold.
+
+    NOTE: This test documents the EXPECTED behavior per plan.
+    Current production code has default 'data/firehose.db' which may indicate
+    the plan change has not been applied to the function signature yet.
+    """
+    import inspect
+    from scripts.train_oracle import train_xgboost_oracle
+
+    sig = inspect.signature(train_xgboost_oracle)
+    parquet_param = sig.parameters.get("parquet_path")
+    assert parquet_param is not None
+
+    # Per plan BLOCO 1: default should be data/training_snapshots/gold
+    assert parquet_param.default == "data/training_snapshots/gold", (
+        f"Expected default 'data/training_snapshots/gold' per BLOCO 1 plan, "
+        f"but found '{parquet_param.default}'"
+    )
+
+
+def test_fetch_training_data_from_parquet_handles_partitioned_directory_correctly(
+    tmp_path, monkeypatch
+) -> None:
+    """Validate fetch_training_data_from_parquet correctly passes directory path to pd.read_parquet."""
+    parquet_dir = tmp_path / "gold"
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a fake partitioned structure
+    league_dir = parquet_dir / "league=Standard"
+    league_dir.mkdir(parents=True, exist_ok=True)
+
+    expected = pd.DataFrame(
+        [
+            {
+                "item_family": "accessory_generic",
+                "price_chaos": 25.0,
+                "ilvl": 84,
+            }
+        ]
+    )
+    captured_path = {"value": ""}
+
+    def _fake_read_parquet(path):
+        captured_path["value"] = str(path)
+        return expected.copy()
+
+    monkeypatch.setattr("scripts.train_oracle.pd.read_parquet", _fake_read_parquet)
+
+    result = fetch_training_data_from_parquet(
+        str(parquet_dir), apply_outlier_filter=False, apply_stale_filter=False
+    )
+
+    # Verify pd.read_parquet received the directory path (not a specific file)
+    assert captured_path["value"] == str(parquet_dir)
+    assert result.equals(expected)
+
+
 def test_run_quality_gates_fails_with_invalid_dataset() -> None:
     df = pd.DataFrame(
         {
