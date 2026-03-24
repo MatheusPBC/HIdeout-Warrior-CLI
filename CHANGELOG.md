@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026-03-24
+
+- Evoluido o `scripts/build_training_snapshot.py` para enriquecer a reconciliacao Bronze com `event_key` mais forte, deteccao de `price_fix_suspected`, resumo detalhado por camada (`bronze`/`silver`/`gold`) e distribuicoes operacionais de `source` e `freshness_band`.
+- Expandido `core/ops_metrics.py` com persistencia dedicada de snapshot metrics em JSON, escrita mais segura com guardrails leves e sanitizacao basica de identificadores usados em arquivo.
+- Atualizado `scripts/ops_report.py` para carregar e exibir as metricas mais recentes de snapshot junto do consolidado operacional existente.
+- Ajustado `scripts/train_oracle.py` para alinhar o fluxo offline em Parquet ao Gold particionado, incluindo default de `parquet_path` apontando para `data/training_snapshots/gold`.
+- Atualizados e ampliados os testes em `tests/test_ops_metrics.py`, `tests/test_ops_report.py`, `tests/test_train_oracle.py` e `tests/test_training_snapshot_job.py`, alem dos testes previamente alterados do Sprint A, cobrindo observabilidade, reconciliação Bronze, guardrails operacionais e leitura de Parquet particionado.
+- Registrado o plano aprovado de implementacao em `docs/PLAN.md` para os blocos de observabilidade do snapshot, reconciliacao Bronze e `train_oracle` readiness.
+- Validacao executada nesta etapa: `pytest -q` com **126 passed** e `py_compile` dos arquivos de producao alterados sem erros.
+
 ## 2026-03-11
 
 - Adicionado `core/poe_oauth.py` com resolucao de OAuth de servico para Path of Exile via `client_credentials`, suportando token direto (`POE_OAUTH_TOKEN`) ou geracao on-demand por `client_id`/`client_secret`.
