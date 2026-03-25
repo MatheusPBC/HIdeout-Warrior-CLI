@@ -26,6 +26,11 @@ class SupabaseCloudConfig:
     firehose_raw_bucket: str = "firehose-raw"
     firehose_raw_manifest_table: str = "firehose_raw_manifest"
 
+    # Retention defaults (em dias)
+    retention_firehose_raw_days: int = 30
+    retention_firehose_storage_days: int = 60
+    retention_snapshot_runs_days: int = 90
+
     @property
     def enabled(self) -> bool:
         return self.backend == "supabase"
@@ -86,4 +91,18 @@ def load_cloud_config() -> SupabaseCloudConfig:
             _clean_optional_str(os.getenv("SUPABASE_FIREHOSE_RAW_MANIFEST_TABLE"))
             or "firehose_raw_manifest"
         ),
+        retention_firehose_raw_days=_int_env("RETENTION_FIREHOSE_RAW_DAYS", 30),
+        retention_firehose_storage_days=_int_env("RETENTION_FIREHOSE_STORAGE_DAYS", 60),
+        retention_snapshot_runs_days=_int_env("RETENTION_SNAPSHOT_RUNS_DAYS", 90),
     )
+
+
+def _int_env(key: str, default: int) -> int:
+    """Lê variável de ambiente como int com fallback."""
+    val = os.getenv(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        return default

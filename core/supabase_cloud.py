@@ -5,7 +5,7 @@ import json
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Tuple
 
 from core.cloud_config import SupabaseCloudConfig, load_cloud_config
 
@@ -67,6 +67,11 @@ def sync_file_to_supabase(
     config: Optional[SupabaseCloudConfig] = None,
     client: Any = None,
 ) -> Optional[CloudArtifactResult]:
+    """Sync a file to Supabase Storage.
+
+    Computes and stores SHA256 for each uploaded artifact.
+    The checksum info is stored in content_sha256 field.
+    """
     effective_config = config or load_cloud_config()
     target_path = Path(file_path)
     if (
@@ -294,6 +299,7 @@ def upsert_firehose_raw_manifest(
     """Upsert um registro no firehose_raw_manifest.
 
     Usa object_path como chave de idempotência (ON CONFLICT DO UPDATE).
+    Armazena content_sha256 de cada upload para verificação posterior.
     """
     effective_config = config or load_cloud_config()
     if not effective_config.is_configured:
@@ -410,3 +416,154 @@ def sync_ops_metrics_to_supabase(
         return True
     except Exception:
         return False
+
+
+# =============================================================================
+# Artifact Integrity Helpers (Bloco B - Fase 2)
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class ArtifactIntegrityInfo:
+    """Information about an artifact's checksum status."""
+
+    artifact_key: str
+    object_path: str
+    stored_sha256: Optional[str]
+    checksum_validated: bool  # True if we have a checksum to validate against
+    is_legacy: bool  # True if artifact has no checksum (legacy)
+
+
+def get_artifact_checksum_info(
+    artifact_key: str,
+    *,
+    config: Optional[SupabaseCloudConfig] = None,
+    client: Any = None,
+) -> Optional[ArtifactIntegrityInfo]:
+    """Get checksum information for an artifact from the catalog.
+
+    Returns ArtifactIntegrityInfo with checksum status, or None if not found.
+    Legacy artifacts (no checksum) will have checksum_validated=False and is_legacy=True.
+    """
+    effective_config = config or load_cloud_config()
+    if not effective_config.is_configured:
+        return None
+
+    supabase = client or _create_supabase_client(effective_config)
+    try:
+        result = (
+            supabase.table(effective_config.artifact_catalog_table)
+            .select("artifact_key", "object_path", "content_sha256")
+            .eq("artifact_key", artifact_key)
+            .maybe_single()
+            .execute()
+        )
+        if not result or not result.data:
+            return None
+
+        row = result.data
+        stored_sha256 = row.get("content_sha256")
+        is_legacy = not bool(stored_sha256)
+
+        return ArtifactIntegrityInfo(
+            artifact_key=str(row.get("artifact_key", "")),
+            object_path=str(row.get("object_path", "")),
+            stored_sha256=stored_sha256 if stored_sha256 else None,
+            checksum_validated=bool(stored_sha256),
+            is_legacy=is_legacy,
+        )
+    except Exception:
+        return None
+
+
+def validate_local_file_checksum(
+    file_path: Path,
+    expected_sha256: str,
+) -> tuple[bool, Optional[str]]:
+    """Validate a local file against an expected SHA256.
+
+    Args:
+        file_path: path to local file
+        expected_sha256: expected SHA256 hex string
+
+    Returns:
+        Tuple of (is_valid, actual_sha256 or None if error)
+    """
+    if not file_path.exists():
+        return False, None
+
+    actual = _file_sha256(file_path)
+    if actual is None:
+        return False, None
+
+    return actual == expected_sha256, actual
+
+
+def verify_artifact_integrity(
+    artifact_key: str,
+    local_file_path: Path,
+    *,
+    config: Optional[SupabaseCloudConfig] = None,
+    client: Any = None,
+) -> dict[str, Any]:
+    """Verify integrity of a downloaded artifact against catalog.
+
+    Args:
+        artifact_key: key of the artifact in catalog
+        local_file_path: path to local file to verify
+        config: optional cloud config override
+        client: optional Supabase client
+
+    Returns:
+        Dict with keys:
+            - is_valid: bool indicating if checksum matches
+            - artifact_key: the artifact key checked
+            - stored_sha256: checksum stored in catalog
+            - actual_sha256: checksum computed from local file
+            - is_legacy: True if artifact has no checksum (cannot validate)
+            - error: error message if something failed
+    """
+    result = {
+        "is_valid": False,
+        "artifact_key": artifact_key,
+        "stored_sha256": None,
+        "actual_sha256": None,
+        "is_legacy": True,
+        "error": None,
+    }
+
+    integrity_info = get_artifact_checksum_info(
+        artifact_key, config=config, client=client
+    )
+    if integrity_info is None:
+        result["error"] = "Artifact not found in catalog"
+        return result
+
+    result["stored_sha256"] = integrity_info.stored_sha256
+    result["is_legacy"] = integrity_info.is_legacy
+
+    if integrity_info.is_legacy:
+        # Legacy artifact - can only compute actual checksum, can't validate
+        result["actual_sha256"] = _file_sha256(local_file_path)
+        result["is_valid"] = True  # Can't validate, so assume valid
+        result["error"] = "Legacy artifact - checksum not available for validation"
+        return result
+
+    if not local_file_path.exists():
+        result["error"] = "Local file does not exist"
+        return result
+
+    actual = _file_sha256(local_file_path)
+    result["actual_sha256"] = actual
+
+    if actual is None:
+        result["error"] = "Failed to compute local file checksum"
+        return result
+
+    result["is_valid"] = actual == integrity_info.stored_sha256
+    if not result["is_valid"]:
+        result["error"] = (
+            f"Checksum mismatch: expected={integrity_info.stored_sha256[:16]}... got={actual[:16]}..."
+        )
+
+    return result

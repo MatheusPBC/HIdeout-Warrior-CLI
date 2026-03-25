@@ -7,9 +7,25 @@ create table if not exists artifact_catalog (
     content_sha256 text not null,
     size_bytes bigint not null,
     metadata jsonb not null default '{}'::jsonb,
+    checksum_validated boolean not null default false,
+    last_verified_at timestamptz,
+    retention_expires_at timestamptz,
+    deleted_at timestamptz,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
+
+create index if not exists artifact_catalog_checksum_idx
+on artifact_catalog(checksum_validated)
+where checksum_validated = false;
+
+create index if not exists artifact_catalog_retention_idx
+on artifact_catalog(retention_expires_at)
+where retention_expires_at is not null;
+
+create index if not exists artifact_catalog_deleted_idx
+on artifact_catalog(deleted_at)
+where deleted_at is not null;
 
 create table if not exists active_models (
     family text primary key,
@@ -50,6 +66,9 @@ create table if not exists firehose_raw_manifest (
     page_end_change_id text,
     file_size_bytes bigint,
     content_sha256 text,
+    checksum_validated boolean not null default false,
+    last_verified_at timestamptz,
+    retention_expires_at timestamptz,
     uploaded_at timestamptz not null default now(),
     status text not null default 'pending' check (status in ('pending', 'uploaded', 'failed')),
     error_message text,
@@ -67,3 +86,11 @@ create index if not exists firehose_raw_manifest_uploaded_at_idx on firehose_raw
 
 -- Index for status-based queries (pending uploads retry, etc.)
 create index if not exists firehose_raw_manifest_status_idx on firehose_raw_manifest(status) where status != 'uploaded';
+
+create index if not exists firehose_raw_manifest_checksum_idx
+on firehose_raw_manifest(checksum_validated)
+where checksum_validated = false;
+
+create index if not exists firehose_raw_manifest_retention_idx
+on firehose_raw_manifest(retention_expires_at)
+where retention_expires_at is not null;

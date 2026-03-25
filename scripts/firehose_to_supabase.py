@@ -158,6 +158,8 @@ def process_firehose_raw(
         try:
             upload_meta = _upload_ndjson(ndjson_file, config, client)
             if upload_meta:
+                # Upload succeeded and SHA256 was computed before upload
+                # content_sha256 is stored for later verification
                 manifest_ok = upsert_firehose_raw_manifest(
                     run_id=date_folder,
                     object_path=upload_meta["object_path"],

@@ -2,17 +2,57 @@
 
 Supports cloud-first runtime: when running in lambda/remote environment,
 artifacts (snapshots, models) can be downloaded from Supabase before processing.
+
+Artifact Integrity (Bloco B - Fase 2):
+- Downloads return DownloadResult with validation metadata
+- Legacy artifacts (no checksum in catalog) are marked checksum_validated=False
+- New artifacts can request validation against expected checksum
+- Validation failures are logged but don't break downloads (strategy 2)
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from core.cloud_config import SupabaseCloudConfig, load_cloud_config
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class DownloadResult:
+    """Result of a cloud download with integrity metadata."""
+
+    local_path: Path
+    success: bool
+    checksum_validated: (
+        bool  # True if SHA256 matched expected, False if legacy/unvalidated
+    )
+    expected_sha256: Optional[str]  # None for legacy artifacts
+    actual_sha256: Optional[str]  # None if download failed before checksum compute
+    error_message: Optional[str]
+
+    @property
+    def is_legacy(self) -> bool:
+        """True if this artifact has no checksum validation (legacy)."""
+        return not self.checksum_validated and self.expected_sha256 is None
+
+
+def _compute_file_sha256(file_path: Path) -> Optional[str]:
+    """Compute SHA256 of a file, returns None on error."""
+    try:
+        digest = hashlib.sha256()
+        with file_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(8192), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception as exc:
+        logger.warning("Falha ao calcular SHA256 de %s: %s", file_path, exc)
+        return None
 
 
 def _create_supabase_client(config: SupabaseCloudConfig):
@@ -29,22 +69,33 @@ def download_file_from_supabase(
     output_path: Path,
     *,
     config: Optional[SupabaseCloudConfig] = None,
-) -> bool:
-    """Download a single file from Supabase Storage.
+    expected_sha256: Optional[str] = None,
+    validate_checksum: bool = True,
+) -> DownloadResult:
+    """Download a single file from Supabase Storage with optional integrity check.
 
     Args:
         artifact_type: artifact category (e.g., 'training_snapshots/gold')
         relative_path: path within the artifact type bucket
         output_path: local destination path
         config: optional cloud config override
+        expected_sha256: if provided, validate download against this SHA256
+        validate_checksum: if True (default), compute and compare SHA256 when expected_sha256 provided
 
     Returns:
-        True if download succeeded, False otherwise
+        DownloadResult with integrity metadata
     """
     effective_config = config or load_cloud_config()
     if not effective_config.is_configured:
         logger.warning("Supabase não configurado, pulando download")
-        return False
+        return DownloadResult(
+            local_path=output_path,
+            success=False,
+            checksum_validated=False,
+            expected_sha256=expected_sha256,
+            actual_sha256=None,
+            error_message="Supabase not configured",
+        )
 
     try:
         supabase = _create_supabase_client(effective_config)
@@ -66,16 +117,56 @@ def download_file_from_supabase(
         with output_path.open("wb") as f:
             f.write(data)
 
+        # Compute actual checksum after successful download
+        actual_sha256 = _compute_file_sha256(output_path)
+
+        # Determine validation status
+        if expected_sha256 and validate_checksum:
+            checksum_validated = actual_sha256 == expected_sha256
+            if not checksum_validated:
+                logger.warning(
+                    "Checksum mismatch for %s: expected=%s actual=%s",
+                    object_path,
+                    expected_sha256,
+                    actual_sha256,
+                )
+                return DownloadResult(
+                    local_path=output_path,
+                    success=True,  # Download succeeded, validation failed
+                    checksum_validated=False,
+                    expected_sha256=expected_sha256,
+                    actual_sha256=actual_sha256,
+                    error_message="Checksum mismatch",
+                )
+        else:
+            # Legacy artifact or validation disabled
+            checksum_validated = False  # Legacy artifacts don't have checksum
+
         logger.info(
-            "Downloaded %s -> %s (%d bytes)",
+            "Downloaded %s -> %s (%d bytes) validated=%s",
             object_path,
             output_path,
             output_path.stat().st_size,
+            checksum_validated,
         )
-        return True
+        return DownloadResult(
+            local_path=output_path,
+            success=True,
+            checksum_validated=checksum_validated,
+            expected_sha256=expected_sha256 if expected_sha256 else None,
+            actual_sha256=actual_sha256,
+            error_message=None,
+        )
     except Exception as exc:
         logger.warning("Falha ao baixar %s/%s: %s", artifact_type, relative_path, exc)
-        return False
+        return DownloadResult(
+            local_path=output_path,
+            success=False,
+            checksum_validated=False,
+            expected_sha256=expected_sha256,
+            actual_sha256=None,
+            error_message=str(exc)[:500],
+        )
 
 
 def download_directory_from_supabase(
@@ -84,7 +175,8 @@ def download_directory_from_supabase(
     output_dir: Path,
     *,
     config: Optional[SupabaseCloudConfig] = None,
-) -> list[Path]:
+    validate_checksum: bool = False,
+) -> list[DownloadResult]:
     """Download all files under a prefix from Supabase Storage.
 
     Args:
@@ -92,16 +184,17 @@ def download_directory_from_supabase(
         prefix: path prefix within artifact type
         output_dir: local destination directory
         config: optional cloud config override
+        validate_checksum: if True, compute checksums for each file (for legacy tracking)
 
     Returns:
-        List of successfully downloaded file paths
+        List of DownloadResult for each attempted file
     """
     effective_config = config or load_cloud_config()
     if not effective_config.is_configured:
         logger.warning("Supabase não configurado, pulando download")
         return []
 
-    downloaded: list[Path] = []
+    results: list[DownloadResult] = []
     try:
         supabase = _create_supabase_client(effective_config)
         base_path = "/".join(
@@ -126,10 +219,10 @@ def download_directory_from_supabase(
         output_dir.mkdir(parents=True, exist_ok=True)
 
         for item in result:
-            if not item.name:
+            if not item.get("name"):
                 continue
-            remote_path = f"{base_path}/{item.name}"
-            local_path = output_dir / item.name
+            remote_path = f"{base_path}/{item['name']}"
+            local_path = output_dir / item["name"]
 
             try:
                 data = supabase.storage.from_(effective_config.storage_bucket).download(
@@ -137,24 +230,50 @@ def download_directory_from_supabase(
                 )
                 with local_path.open("wb") as f:
                     f.write(data)
-                downloaded.append(local_path)
+
+                # Compute checksum if requested (for integrity tracking)
+                actual_sha256 = None
+                if validate_checksum:
+                    actual_sha256 = _compute_file_sha256(local_path)
+
+                results.append(
+                    DownloadResult(
+                        local_path=local_path,
+                        success=True,
+                        checksum_validated=False,  # Legacy - no expected checksum to compare
+                        expected_sha256=None,
+                        actual_sha256=actual_sha256,
+                        error_message=None,
+                    )
+                )
                 logger.debug("Downloaded %s -> %s", remote_path, local_path)
             except Exception as exc:
                 logger.warning("Falha ao baixar %s: %s", remote_path, exc)
+                results.append(
+                    DownloadResult(
+                        local_path=local_path,
+                        success=False,
+                        checksum_validated=False,
+                        expected_sha256=None,
+                        actual_sha256=None,
+                        error_message=str(exc)[:500],
+                    )
+                )
                 continue
 
         logger.info(
-            "Download directory %s -> %s: %d files",
+            "Download directory %s -> %s: %d files, %d succeeded",
             base_path,
             output_dir,
-            len(downloaded),
+            len(results),
+            sum(1 for r in results if r.success),
         )
     except Exception as exc:
         logger.warning(
             "Falha ao listar diretório %s/%s: %s", artifact_type, prefix, exc
         )
 
-    return downloaded
+    return results
 
 
 def ensure_latest_gold_snapshot(
@@ -162,7 +281,7 @@ def ensure_latest_gold_snapshot(
     output_dir: Path,
     *,
     config: Optional[SupabaseCloudConfig] = None,
-) -> Optional[Path]:
+) -> tuple[Optional[Path], list[DownloadResult]]:
     """Ensure the latest gold snapshot is available locally.
 
     Downloads from Supabase if not present or if local is older.
@@ -173,11 +292,11 @@ def ensure_latest_gold_snapshot(
         config: optional cloud config override
 
     Returns:
-        Path to gold parquet file or None if unavailable
+        Tuple of (Path to gold parquet file or None if unavailable, list of download results)
     """
     effective_config = config or load_cloud_config()
     if not effective_config.is_configured:
-        return None
+        return None, []
 
     gold_dir = output_dir / "gold"
     expected_pattern = f"snapshot_date={snapshot_date}"
@@ -189,22 +308,26 @@ def ensure_latest_gold_snapshot(
     for f in local_files:
         if expected_pattern in str(f):
             logger.info("Gold snapshot já existe localmente: %s", f)
-            return f
+            return f, []
 
     logger.info(
         "Gold snapshot não encontrado localmente para %s, tentando download",
         snapshot_date,
     )
 
-    downloaded = download_directory_from_supabase(
+    download_results = download_directory_from_supabase(
         artifact_type="training_snapshots",
         prefix=f"gold/{expected_pattern}",
         output_dir=gold_dir,
         config=effective_config,
     )
 
-    parquet_files = [p for p in downloaded if p.suffix == ".parquet"]
+    parquet_files = [
+        r.local_path
+        for r in download_results
+        if r.local_path.suffix == ".parquet" and r.success
+    ]
     if parquet_files:
-        return parquet_files[0]
+        return parquet_files[0], download_results
 
-    return None
+    return None, download_results

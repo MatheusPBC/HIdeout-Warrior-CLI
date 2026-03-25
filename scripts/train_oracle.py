@@ -24,6 +24,7 @@ from core.supabase_cloud import (
     download_file_from_supabase,
     list_artifacts_from_supabase,
     sync_file_to_supabase,
+    get_artifact_checksum_info,
 )
 from scripts.model_registry import register_and_evaluate_candidate
 
@@ -563,7 +564,7 @@ def fetch_latest_snapshot_from_cloud(
     local_dest_dir: Path,
     artifact_type: str = "snapshot_gold",
     snapshot_date: Optional[str] = None,
-) -> Optional[Path]:
+) -> tuple[Optional[Path], Optional[dict]]:
     """Baixa snapshot mais recente do Supabase Storage.
 
     Args:
@@ -572,11 +573,11 @@ def fetch_latest_snapshot_from_cloud(
         snapshot_date: se fornecido, baixa snapshot específico; senão, pega o mais recente
 
     Returns:
-        Path do diretório baixado ou None se falhou/não encontrou
+        Tuple of (Path do diretório baixado ou None, dict com info de integridade ou None)
     """
     artifacts = list_artifacts_from_supabase(artifact_type)
     if not artifacts:
-        return None
+        return None, None
 
     if snapshot_date:
         filtered = [
@@ -585,13 +586,13 @@ def fetch_latest_snapshot_from_cloud(
             if a.get("metadata", {}).get("snapshot_date") == snapshot_date
         ]
         if not filtered:
-            return None
+            return None, None
         candidates = filtered
     else:
         candidates = artifacts
 
     if not candidates:
-        return None
+        return None, None
 
     candidates.sort(
         key=lambda a: a.get("object_path", ""),
@@ -600,7 +601,17 @@ def fetch_latest_snapshot_from_cloud(
     chosen = candidates[0]
     object_path = chosen.get("object_path", "")
     if not object_path:
-        return None
+        return None, None
+
+    # Get artifact key and check for checksum info (legacy vs validated)
+    artifact_key = chosen.get("artifact_key")
+    integrity_info = None
+    expected_sha256 = None
+
+    if artifact_key:
+        integrity_info = get_artifact_checksum_info(artifact_key)
+        if integrity_info and integrity_info.stored_sha256:
+            expected_sha256 = integrity_info.stored_sha256
 
     local_dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -610,14 +621,30 @@ def fetch_latest_snapshot_from_cloud(
     cloud_path = object_path.replace(f"hideout-warrior/{artifact_type}/", "")
     local_file = gold_dir / Path(cloud_path).name
 
-    success = download_file_from_supabase(
+    from core.cloud_download import download_file_from_supabase as cloud_download
+
+    download_result = cloud_download(
         remote_path=cloud_path,
         local_destination=local_file,
         artifact_type=artifact_type,
+        expected_sha256=expected_sha256,
+        validate_checksum=bool(expected_sha256),  # Only validate if we have checksum
     )
-    if success:
-        return gold_dir
-    return None
+
+    # Build integrity info for caller
+    result_integrity = {
+        "artifact_key": artifact_key,
+        "object_path": object_path,
+        "checksum_validated": download_result.checksum_validated,
+        "is_legacy": download_result.is_legacy,
+        "expected_sha256": download_result.expected_sha256,
+        "actual_sha256": download_result.actual_sha256,
+        "error_message": download_result.error_message,
+    }
+
+    if download_result.success:
+        return gold_dir, result_integrity
+    return None, result_integrity
 
 
 def _trade_item_from_firehose_row(row: Mapping[str, Any]) -> Optional[dict]:
@@ -1166,7 +1193,7 @@ if __name__ == "__main__":
 
             cfg = load_cloud_config()
             if cfg.enabled and cfg.is_configured:
-                downloaded = fetch_latest_snapshot_from_cloud(
+                downloaded, integrity_info = fetch_latest_snapshot_from_cloud(
                     local_dest_dir=Path("data/training_snapshots"),
                     artifact_type="snapshot_gold",
                     snapshot_date=cloud_snapshot_date,
@@ -1176,6 +1203,16 @@ if __name__ == "__main__":
                     print(
                         f"[green]Snapshot cloud baixado em: {effective_parquet_path}[/green]"
                     )
+                    # Log integrity status (legacy vs validated)
+                    if integrity_info:
+                        if integrity_info.get("is_legacy"):
+                            print(
+                                f"[yellow]  Legacy artifact (sem checksum validado)[/yellow]"
+                            )
+                        elif integrity_info.get("checksum_validated"):
+                            print(
+                                f"[green]  Checksum validado: {integrity_info.get('actual_sha256', 'N/A')[:16]}...[/green]"
+                            )
                 else:
                     print(
                         "[yellow]Nenhum snapshot encontrado no cloud; usando fonte local.[/yellow]"

@@ -2,6 +2,17 @@
 
 ## 2026-03-25
 
+- Evoluída a migração Supabase para a Fase 2 com scripts operacionais cloud-native: `scripts/bootstrap_supabase.py`, `scripts/supabase_health_check.py`, `scripts/cleanup_firehose_raw.py` e `scripts/retention_policy.py`, todos com foco em dry-run/checks seguros por padrão.
+- Expandido `core/cloud_download.py` com `DownloadResult`, metadata de integridade e comportamento compatível com a estratégia 2 para artefatos legados (`checksum_validated=false` sem quebrar downloads).
+- Reforçado `core/supabase_cloud.py` com helpers de integridade/consulta de checksum e adaptação do catálogo para novos uploads com `content_sha256` consistente e verificação local quando aplicável.
+- Ajustados `scripts/train_oracle.py` e `scripts/firehose_to_supabase.py` para consumir o fluxo de integridade cloud sem quebrar artefatos existentes no Storage.
+- Atualizado `core/cloud_config.py` com parâmetros de retenção (`RETENTION_FIREHOSE_RAW_DAYS`, `RETENTION_FIREHOSE_STORAGE_DAYS`, `RETENTION_SNAPSHOT_RUNS_DAYS`) para governança operacional inicial.
+- Corrigido `supabase/schema.sql` para suportar governança de artefatos e raw manifest com colunas de integridade/retenção (`checksum_validated`, `last_verified_at`, `retention_expires_at`, `deleted_at`) e índices idempotentes associados.
+- Adicionados testes em `tests/test_cloud_download.py`, `tests/test_bootstrap_supabase.py`, `tests/test_supabase_health_check.py`, `tests/test_cleanup_firehose_raw.py` e `tests/test_retention_policy.py`, além da expansão de `tests/test_supabase_cloud.py` para cobrir a Fase 2.
+- Validação executada nesta etapa: testes focados da Fase 2 com **74 passed**, suíte completa com **226 passed** e `py_compile` dos arquivos principais alterados sem erros.
+
+## 2026-03-25
+
 - Introduzida a base da migracao `local-first -> Supabase full cloud` com configuracao central em `core/cloud_config.py`, adaptadores em `core/supabase_cloud.py` e suporte ao cliente Python do Supabase em `requirements.txt`.
 - Adicionado `supabase/schema.sql` com tabelas e indices para estado e catalogo cloud (`artifact_catalog`, `active_models`, `snapshot_runs`, `firehose_checkpoints`, `firehose_raw_manifest`).
 - Evoluido `scripts/firehose_miner.py` para preferir checkpoint do Supabase com fallback para SQLite e gerar landing NDJSON por pagina em `data/firehose_raw/`.

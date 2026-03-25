@@ -330,5 +330,214 @@ def test_upsert_firehose_raw_manifest_returns_false_when_not_configured() -> Non
     assert success is False
 
 
+# ─── Artifact Integrity Helpers (Bloco B - Fase 2) ───────────────────────────────
+
+
+from core.supabase_cloud import (
+    ArtifactIntegrityInfo,
+    get_artifact_checksum_info,
+    validate_local_file_checksum,
+    verify_artifact_integrity,
+)
+
+
+class _FakeSupabaseForIntegrity:
+    """Fake client that returns different results for catalog queries."""
+
+    def __init__(self, catalog_result: Any = None) -> None:
+        self._catalog_result = catalog_result
+        self.queries: list[str] = []
+
+    def table(self, name: str):
+        self.queries.append(name)
+        if "artifact_catalog" in name:
+            return _FakeTableForCatalog(self._catalog_result)
+        return _FakeTableForGeneric()
+
+
+class _FakeTableForCatalog:
+    def __init__(self, result: Any) -> None:
+        self._result = result
+
+    def select(self, *args):
+        return self
+
+    def eq(self, *args):
+        return self
+
+    def maybe_single(self):
+        return self
+
+    def execute(self):
+        return self._result
+
+
+def test_get_artifact_checksum_info_returns_info_for_artifact_with_sha256() -> None:
+    """get_artifact_checksum_info returns ArtifactIntegrityInfo when artifact has checksum."""
+    fake_result = MagicMock()
+    fake_result.data = {
+        "artifact_key": "hw-data:dev/models/registry.json",
+        "object_path": "dev/models/registry.json",
+        "content_sha256": "abc123def456",
+    }
+    client = _FakeSupabaseForIntegrity(catalog_result=fake_result)
+
+    info = get_artifact_checksum_info(
+        "hw-data:dev/models/registry.json",
+        config=_config(),
+        client=client,
+    )
+
+    assert info is not None
+    assert info.artifact_key == "hw-data:dev/models/registry.json"
+    assert info.stored_sha256 == "abc123def456"
+    assert info.checksum_validated is True
+    assert info.is_legacy is False
+
+
+def test_get_artifact_checksum_info_marks_legacy_when_no_sha256() -> None:
+    """get_artifact_checksum_info marks artifact as legacy when content_sha256 is null."""
+    fake_result = MagicMock()
+    fake_result.data = {
+        "artifact_key": "hw-data:dev/legacy/file.txt",
+        "object_path": "dev/legacy/file.txt",
+        "content_sha256": None,
+    }
+    client = _FakeSupabaseForIntegrity(catalog_result=fake_result)
+
+    info = get_artifact_checksum_info(
+        "hw-data:dev/legacy/file.txt",
+        config=_config(),
+        client=client,
+    )
+
+    assert info is not None
+    assert info.is_legacy is True
+    assert info.checksum_validated is False
+    assert info.stored_sha256 is None
+
+
+def test_get_artifact_checksum_info_returns_none_when_not_found() -> None:
+    """get_artifact_checksum_info returns None when artifact not in catalog."""
+    fake_result = MagicMock()
+    fake_result.data = None
+    client = _FakeSupabaseForIntegrity(catalog_result=fake_result)
+
+    info = get_artifact_checksum_info(
+        "nonexistent-artifact",
+        config=_config(),
+        client=client,
+    )
+
+    assert info is None
+
+
+def test_validate_local_file_checksum_match(tmp_path: Path) -> None:
+    """validate_local_file_checksum returns True when SHA256 matches."""
+    test_file = tmp_path / "test.txt"
+    test_file.write_bytes(b"hello world")
+    expected_sha = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+
+    is_valid, actual = validate_local_file_checksum(test_file, expected_sha)
+
+    assert is_valid is True
+    assert actual == expected_sha
+
+
+def test_validate_local_file_checksum_mismatch(tmp_path: Path) -> None:
+    """validate_local_file_checksum returns False when SHA256 doesn't match."""
+    test_file = tmp_path / "test.txt"
+    test_file.write_bytes(b"hello world")
+    wrong_sha = "deadbeef" * 8
+
+    is_valid, actual = validate_local_file_checksum(test_file, wrong_sha)
+
+    assert is_valid is False
+    assert actual is not None
+    assert actual != wrong_sha
+
+
+def test_validate_local_file_checksum_missing_file(tmp_path: Path) -> None:
+    """validate_local_file_checksum returns False for missing file."""
+    missing = tmp_path / "does_not_exist.txt"
+
+    is_valid, actual = validate_local_file_checksum(missing, "anysha")
+
+    assert is_valid is False
+    assert actual is None
+
+
+def test_verify_artifact_integrity_legacy_artifact(tmp_path: Path) -> None:
+    """verify_artifact_integrity marks legacy artifacts as valid (can't validate)."""
+    fake_result = MagicMock()
+    fake_result.data = {
+        "artifact_key": "hw-data:dev/legacy/file.txt",
+        "object_path": "dev/legacy/file.txt",
+        "content_sha256": None,
+    }
+    client = _FakeSupabaseForIntegrity(catalog_result=fake_result)
+    test_file = tmp_path / "legacy.txt"
+    test_file.write_bytes(b"legacy content")
+
+    result = verify_artifact_integrity(
+        "hw-data:dev/legacy/file.txt",
+        test_file,
+        config=_config(),
+        client=client,
+    )
+
+    assert result["is_valid"] is True
+    assert result["is_legacy"] is True
+    assert "Legacy artifact" in (result["error"] or "")
+
+
+def test_verify_artifact_integrity_with_matching_checksum(tmp_path: Path) -> None:
+    """verify_artifact_integrity returns is_valid=True when checksums match."""
+    content = b"hello world"
+    sha = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    fake_result = MagicMock()
+    fake_result.data = {
+        "artifact_key": "hw-data:dev/snapshots/hello.txt",
+        "object_path": "dev/snapshots/hello.txt",
+        "content_sha256": sha,
+    }
+    client = _FakeSupabaseForIntegrity(catalog_result=fake_result)
+    test_file = tmp_path / "hello.txt"
+    test_file.write_bytes(content)
+
+    result = verify_artifact_integrity(
+        "hw-data:dev/snapshots/hello.txt",
+        test_file,
+        config=_config(),
+        client=client,
+    )
+
+    assert result["is_valid"] is True
+    assert result["is_legacy"] is False
+    assert result["stored_sha256"] == sha
+    assert result["actual_sha256"] == sha
+
+
+def test_verify_artifact_integrity_missing_local_file() -> None:
+    """verify_artifact_integrity returns error when local file doesn't exist."""
+    fake_result = MagicMock()
+    fake_result.data = {
+        "artifact_key": "hw-data:dev/models/file.txt",
+        "object_path": "dev/models/file.txt",
+        "content_sha256": "abc123",
+    }
+    client = _FakeSupabaseForIntegrity(catalog_result=fake_result)
+
+    result = verify_artifact_integrity(
+        "hw-data:dev/models/file.txt",
+        Path("/nonexistent/file.txt"),
+        config=_config(),
+        client=client,
+    )
+
+    assert result["is_valid"] is False
+    assert "Local file does not exist" in (result["error"] or "")
+
+
 # needed for fake
 from unittest.mock import MagicMock
