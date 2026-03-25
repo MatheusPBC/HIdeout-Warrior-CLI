@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-03-25
+
+- Introduzida a base da migracao `local-first -> Supabase full cloud` com configuracao central em `core/cloud_config.py`, adaptadores em `core/supabase_cloud.py` e suporte ao cliente Python do Supabase em `requirements.txt`.
+- Adicionado `supabase/schema.sql` com tabelas e indices para estado e catalogo cloud (`artifact_catalog`, `active_models`, `snapshot_runs`, `firehose_checkpoints`, `firehose_raw_manifest`).
+- Evoluido `scripts/firehose_miner.py` para preferir checkpoint do Supabase com fallback para SQLite e gerar landing NDJSON por pagina em `data/firehose_raw/`.
+- Criados `scripts/backfill_firehose_checkpoint.py` e `scripts/firehose_to_supabase.py` para migracao de checkpoint SQLite -> Supabase e upload/catalogacao do raw landing no Storage, com manifesto idempotente por `object_path`.
+- Integrado o pipeline operacional para sync cloud de snapshots, modelos, metadata e relatorios por meio de `scripts/supabase_sync.py`, alem de uploads automáticos a partir de `scripts/build_training_snapshot.py`, `scripts/model_registry.py`, `scripts/train_oracle.py` e `scripts/ops_report.py`.
+- Adicionado `core/cloud_download.py` e expandido `scripts/train_oracle.py` com modo `--cloud` para baixar snapshots do Supabase Storage antes do treino quando aplicavel.
+- Expandido `scripts/ops_cycle.py` com fluxo mais cloud-aware, novas flags operacionais (`--skip-miner`, `--skip-sync`, `--sync-only`) e compatibilidade com fallback local sem quebrar a execução tradicional.
+- Adicionado `.env.supabase.example` como template seguro de configuracao cloud e atualizado `docs/PLAN.md` para registrar a proxima fase da migracao Supabase.
+- Adicionados/atualizados testes em `tests/test_cloud_config.py`, `tests/test_supabase_cloud.py`, `tests/test_backfill_firehose_checkpoint.py`, `tests/test_firehose_to_supabase.py`, `tests/test_firehose_miner.py`, `tests/test_model_registry.py`, `tests/test_ops_metrics.py` e `tests/test_ops_cycle.py` cobrindo checkpoint cloud, raw landing, manifesto, sync e runtime cloud-aware.
+- Validacao executada nesta etapa: `pytest -q` com **162 passed** e `py_compile` dos arquivos principais alterados sem erros.
+
 ## 2026-03-24
 
 - Evoluido o `scripts/build_training_snapshot.py` para enriquecer a reconciliacao Bronze com `event_key` mais forte, deteccao de `price_fix_suspected`, resumo detalhado por camada (`bronze`/`silver`/`gold`) e distribuicoes operacionais de `source` e `freshness_band`.
