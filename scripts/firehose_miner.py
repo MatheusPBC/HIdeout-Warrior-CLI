@@ -19,6 +19,14 @@ from core.poe_oauth import (
     DEFAULT_SERVICE_SCOPE,
     resolve_service_oauth_token,
 )
+import logging
+
+from core.supabase_cloud import (
+    load_checkpoint_from_supabase,
+    sync_firehose_checkpoint_to_supabase,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_optional_str(
@@ -201,6 +209,22 @@ def initialize_database(conn: sqlite3.Connection) -> None:
 
 
 def load_checkpoint(conn: sqlite3.Connection) -> Optional[str]:
+    """Carrega checkpoint. Preferência: Supabase (se configurado) → SQLite local."""
+    from core.cloud_config import load_cloud_config
+
+    config = load_cloud_config()
+    if config.is_configured:
+        cloud_checkpoint = load_checkpoint_from_supabase(config=config)
+        if cloud_checkpoint and cloud_checkpoint.get("next_change_id"):
+            logger.info(
+                "checkpoint carregado do Supabase: %s",
+                cloud_checkpoint["next_change_id"],
+            )
+            return cloud_checkpoint["next_change_id"]
+        logger.warning(
+            "Supabase configurado mas checkpoint não encontrado, usando SQLite local"
+        )
+
     row = conn.execute(
         "SELECT next_change_id FROM miner_checkpoint WHERE id = 1"
     ).fetchone()
@@ -238,6 +262,23 @@ def update_checkpoint(
         (next_change_id, pages_delta, ingested_delta, duplicates_delta),
     )
     conn.commit()
+    try:
+        row = conn.execute(
+            "SELECT next_change_id, pages_processed, events_ingested, duplicates_skipped FROM miner_checkpoint WHERE id = 1"
+        ).fetchone()
+        if row:
+            success = sync_firehose_checkpoint_to_supabase(
+                next_change_id=str(row[0] or ""),
+                pages_processed=int(row[1] or 0),
+                events_ingested=int(row[2] or 0),
+                duplicates_skipped=int(row[3] or 0),
+            )
+            if not success:
+                logger.warning(
+                    "sync checkpoint para Supabase retornou False (cloud não configurado ou indisponível)"
+                )
+    except Exception as exc:
+        logger.warning("falha ao sincronizar checkpoint para Supabase: %s", exc)
 
 
 def fetch_stash_page(
@@ -308,6 +349,44 @@ def _build_session(
     return session
 
 
+FIREHOSE_RAW_DIR = Path("data/firehose_raw")
+
+
+def _write_ndjson_landing(
+    payload: Dict[str, Any],
+    change_id: str,
+    collected_at: str,
+) -> None:
+    """Escreve payload bruto do firehose em NDJSON para landing buffer local.
+
+    Arquivo: data/firehose_raw/{date}/{change_id}.ndjson
+    Cada linha é um JSON com metadata + items.
+    """
+    try:
+        date_str = collected_at[:10]  # YYYY-MM-DD
+        landing_dir = FIREHOSE_RAW_DIR / date_str
+        landing_dir.mkdir(parents=True, exist_ok=True)
+        file_path = landing_dir / f"{change_id}.ndjson"
+        record = {
+            "change_id": change_id,
+            "collected_at": collected_at,
+            "next_change_id": payload.get("next_change_id", ""),
+            "stashes_count": len(payload.get("stashes", []) or []),
+            "items_count": sum(
+                len(s.get("items", []) or []) for s in payload.get("stashes", []) or []
+            ),
+            "raw_payload": payload,
+        }
+        with file_path.open("w", encoding="utf-8") as f:
+            f.write(
+                json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+    except Exception as exc:
+        logger.warning(
+            "falha ao escrever NDJSON landing para change_id=%s: %s", change_id, exc
+        )
+
+
 def ingest_stash_page(
     conn: sqlite3.Connection,
     payload: Dict[str, Any],
@@ -322,6 +401,9 @@ def ingest_stash_page(
     effective_collected_at = collected_at or _utc_now_iso()
     effective_oauth_source = str(oauth_source or "")
     effective_oauth_scope = str(oauth_scope or "")
+
+    # NDJSON landing buffer
+    _write_ndjson_landing(payload, change_id, effective_collected_at)
 
     stashes = payload.get("stashes", [])
     with conn:

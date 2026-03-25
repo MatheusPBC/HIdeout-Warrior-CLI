@@ -103,3 +103,37 @@ def test_promote_if_better_rejects_when_improvement_below_threshold(
     assert registry["families"]["generic"]["versions"][0]["decision_reason"] == (
         "abs_improvement_below_threshold"
     )
+
+
+def test_register_candidate_triggers_cloud_registry_sync(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry_path = tmp_path / "registry.json"
+    captured = {"file_sync": 0, "state_sync": 0}
+
+    def _fake_file_sync(*args, **kwargs):
+        captured["file_sync"] += 1
+        return None
+
+    def _fake_state_sync(*args, **kwargs):
+        captured["state_sync"] += 1
+        return 1
+
+    monkeypatch.setattr("scripts.model_registry.sync_file_to_supabase", _fake_file_sync)
+    monkeypatch.setattr(
+        "scripts.model_registry.sync_registry_state_to_supabase",
+        _fake_state_sync,
+    )
+
+    register_candidate(
+        family="generic",
+        run_id="run-cloud-001",
+        model_path="data/price_oracle_generic.xgb",
+        model_sha256="sha-cloud",
+        metrics={"rmse": 1.0, "baseline_rmse": 2.0},
+        registry_path=registry_path,
+    )
+
+    assert captured["file_sync"] >= 1
+    assert captured["state_sync"] >= 1

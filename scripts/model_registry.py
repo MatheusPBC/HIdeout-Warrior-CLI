@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, cast
 
+from core.supabase_cloud import sync_file_to_supabase, sync_registry_state_to_supabase
+
 
 REGISTRY_PATH = Path("data/model_registry/registry.json")
 
@@ -43,6 +45,15 @@ def save_registry(
         json.dumps(registry, ensure_ascii=True, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    try:
+        sync_file_to_supabase(
+            registry_path,
+            artifact_type="model_registry",
+            metadata={"path": str(registry_path)},
+        )
+        sync_registry_state_to_supabase(registry)
+    except Exception:
+        pass
     return registry_path
 
 

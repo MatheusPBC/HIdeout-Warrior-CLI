@@ -122,3 +122,31 @@ class TestEmitSnapshotMetrics:
 
         assert result_path.name.startswith("snapshot_")
         assert result_path.name.endswith(".json")
+
+    def test_emit_snapshot_metrics_attempts_cloud_sync(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        captured = {}
+
+        def _fake_sync(file_path, *, artifact_type, metadata):
+            captured["file_path"] = str(file_path)
+            captured["artifact_type"] = artifact_type
+            captured["metadata"] = metadata
+            return None
+
+        monkeypatch.setattr("core.ops_metrics.sync_file_to_supabase", _fake_sync)
+
+        result_path = emit_snapshot_metrics(
+            snapshot_summary={
+                "snapshot_date": "2026-03-11",
+                "bronze": {"rows": 1},
+                "silver": {"rows": 1},
+                "gold": {"rows": 1},
+            },
+            metrics_dir=tmp_path,
+            run_id="snapshot-run",
+        )
+
+        assert captured["file_path"] == str(result_path)
+        assert captured["artifact_type"] == "snapshot_metrics"
+        assert captured["metadata"]["snapshot_date"] == "2026-03-11"

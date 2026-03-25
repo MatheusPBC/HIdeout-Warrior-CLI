@@ -1,123 +1,143 @@
-# Hideout Warrior CLI - Plano de Implementação
+# Hideout Warrior CLI - Plano de Migração Supabase Full Cloud
 
 ## Visão Geral
 
-Evoluir a base de dados e treino do Hideout Warrior para:
-1. train_oracle readiness — consumir snapshots Gold em Parquet
-2. reconciliação mais forte na Bronze — deduplicação e reconciliação multi-fonte
-3. observabilidade do snapshot — métricas e relatórios operacionais
+Migrar o estado operacional de local-first (SQLite `data/firehose.db`) para Supabase cloud, mantendo compatibilidade local durante a transição.
 
-**Estado atual:** Sprint A (Bronze/Silver/Gold + metadata) funcional. Train oracle existente com quality gates.
+**Arquitetura alvo:**
+- **Postgres/Supabase** = checkpoint, catalog, registry, runs, metadata
+- **Supabase Storage** = raw dumps, snapshots parquet, models, metrics, reports
+- **Evitar** Postgres como data lake bruto
+
+**Supabase dump land (NDJSON)** → Postgres (checkpoint/catalog) → Storage (arquivos grandes)
 
 ---
 
-## Bloco 1: train_oracle Readiness
+## Bloco 1: Checkpoint/State Migration
 
 ### Objetivo
-Garantir que `train_oracle.py` consuma dados do snapshot Parquet Gold de forma robusta.
+Migrar `firehose_checkpoints` e `load_checkpoint` para Postgres como fonte oficial, eliminando dependência do `miner_checkpoint` local em SQLite.
 
 ### O que existe
-- `fetch_training_data_from_parquet()` já existe em train_oracle.py
-- `build_training_snapshot.py` já gera Gold particionado
+- `firehose_checkpoints` table já existe em `supabase/schema.sql`
+- `sync_firehose_checkpoint_to_supabase()` em `core/supabase_cloud.py` já faz upsert
+- `update_checkpoint()` em `firehose_miner.py` chama sync com `except: pass` (silencioso)
+- `load_checkpoint()` lê apenas do SQLite local
 
 ### O que fazer
-1. **Testar end-to-end**: validar que `train_oracle.py --source parquet` consome `data/training_snapshots/gold/` sem erros
-2. **Fix path handling**: garantir que `fetch_training_data_from_parquet()` aceita diretório particionado (não só arquivo único)
-3. **CLI default**: mudar default de `--source api` para `--source parquet` após validação
-4. **Persistir metadata**: garantir que `persist_model_metadata()` salva hash do dataset e snapshot_date
+1. **Criar `load_checkpoint_from_supabase()`** em `core/supabase_cloud.py` — lê `next_change_id` da tabela `firehose_checkpoints` via `sync_firehose_checkpoint_to_supabase`
+2. **Atualizar `load_checkpoint()`** em `scripts/firehose_miner.py` — fallback: Postgres → SQLite
+3. **Tornar sync obrigatório** em `update_checkpoint()` — remover `except: pass`; se Supabase falhar, logar warning mas não parar
+4. **Criar script de backfill** — sincroniza checkpoint atual do SQLite para Postgres uma única vez
 
 ### Arquivos
-- `scripts/train_oracle.py` — ajustes em `fetch_training_data_from_parquet()`
-- `tests/test_train_oracle.py` — novo teste de leitura de diretório particionado
+- `core/supabase_cloud.py` — adicionar `load_checkpoint_from_supabase()`
+- `scripts/firehose_miner.py` — atualizar `load_checkpoint()`, `update_checkpoint()`
+- `scripts/backfill_firehose_checkpoint.py` — script one-shot SQLite → Postgres
 
 ### Verificação
-- `python -m scripts.train_oracle train --source parquet` executa sem erro
-- metadata JSON contém `dataset_hash` e `snapshot_date`
+- `python -m scripts.firehose_miner run --max-pages 1` executa e persiste checkpoint no Postgres
+- `load_checkpoint()` retorna valor mesmo que `data/firehose.db` seja deletado
+
+### Riscos
+- Postgres indisponível durante execução → fallback para SQLite (deve funcionar sem quebrar)
+- Conflito de checkpoint se duas instâncias rodarem simultaneamente (requer `ON CONFLICT`)
 
 ---
 
-## Bloco 2: Reconciliação Mais Forte na Bronze
+## Bloco 2: Raw Ingest Landing Strategy
 
 ### Objetivo
-Melhorar deduplicação e reconciliação de itens observados em múltiplas fontes (`stash` + `trade`).
+Evitar que Postgres vire data lake. Raw items do firehose vão para Supabase Storage como NDJSON, não para tabelas Postgres.
 
 ### O que existe
-- `_enrich_bronze_observations()` já calcula `seen_count`, `source_count`, `source=both`
-- `event_key` baseado em `item_id + indexed + price_chaos`
+- Firehose currently dumps raw items to local SQLite `stash_events` table (milhares de rows por página)
+- `data/firehose_raw/` não existe ainda — sem landing zone
 
 ### O que fazer
-1. **Reforçar event_key**: adicionar `account_name` + `base_type` ao hash de event_key para reduzir falsos positivos
-2. **Reconciliação por `item_id`**: itens com mesmo `item_id` e preços diferentes devem ser marcados como `price_fix_suspected`
-3. **Tracking de preços**: manter lista de preços observados por `item_id` e detectar variações >50% como anomalias
-4. **Persistir query_context**: garantir que `query_context` é preenchido corretamente para ambas as fontes
+1. **Criar landing buffer NDJSON** — modificar `ingest_stash_page()` para também escrever cada page payload em `data/firehose_raw/{date}/{page_change_id}.ndjson`
+2. **Criar `scripts/firehose_to_supabase.py`** — consume `data/firehose_raw/`, faz upload para Supabase Storage bucket `firehose-raw`, apaga local após upload confirmado
+3. **Manter Postgres apenas para checkpoint/catalog** — não fazer INSERT de items no Postgres, apenas no SQLite local (para query ad-hoc) E no NDJSON landing
+4. **Table `firehose_raw_manifest`** (Postgres) — cataloga cada NDJSON dump: `{run_id, object_path, rows_count, uploaded_at}`
 
 ### Arquivos
-- `scripts/build_training_snapshot.py` — ajustes em `_stable_event_key()`, `_enrich_bronze_observations()`
-- `tests/test_training_snapshot_job.py` — atualizar testes de reconciliação
+- `scripts/firehose_miner.py` — alterar `ingest_stash_page()` para escrever NDJSON
+- `scripts/firehose_to_supabase.py` — upload + manifest + cleanup
+- `supabase/schema.sql` — adicionar tabela `firehose_raw_manifest`
+- `core/cloud_config.py` — adicionar `firehose_raw_manifest_table`
 
 ### Verificação
-- Mesmo item em stash_events e trade_bucket_events resulta em `source=both`
-- Variação de preço >50% no mesmo item gera `price_fix_suspected` flag
+- Após 10 páginas, `data/firehose_raw/` contém 10 arquivos NDJSON
+- `python -m scripts.firehose_to_supabase --dry-run` lista uploads sem executar
+- `firehose_raw_manifest` no Postgres tem registro de cada upload
+
+### Riscos
+- Disco local lota se `firehose_to_supabase` falhar por longos períodos — agendar cleanup ou tamanho máximo do buffer
+- Ordem de ingest não garantida em uploads paralelos — resolver com page_change_id no nome do arquivo
 
 ---
 
-## Bloco 3: Observabilidade do Snapshot
+## Bloco 3: Command/Runtime Migration
 
 ### Objetivo
-Emitir métricas operacionais por execução do snapshot.
+Tornar Supabase o backend default e garantir que todos os scripts operacionais funcionam com `HW_CLOUD_BACKEND=supabase`.
 
 ### O que existe
-- `core/ops_metrics.py` e `scripts/ops_report.py` existem
-- `build_training_snapshot()` retorna summary dict
+- `core/cloud_config.py` já suporta `HW_CLOUD_BACKEND=supabase`
+- `sync_file_to_supabase()`, `sync_directory_to_supabase()` — upload para Storage
+- `supabase_sync.py` — CLI para sync manual de artefatos
+- `sync_snapshot_summary_to_supabase()`, `sync_registry_state_to_supabase()` — metadata
 
 ### O que fazer
-1. **Métricas por camada**:
-   - Bronze: `rows_read`, `rows_valid`, `rows_deduped`, `invalid_json`, taxa de deduplicação
-   - Silver: `rows_input`, `rows_output`, `normalization_failures`
-   - Gold: `rows_input`, `rows_output`, `feature_extraction_failures`
-2. **Métricas de fonte**:
-   - Distribuição de `source` (stash/trade/both)
-   - Distribuição de `freshness_band`
-3. **Emitir JSON de métricas**: `data/ops_metrics/snapshot_{date}.json`
-4. **Expandir `ops_report.py`**: resumir métricas de snapshot +ops cycle
+1. **Atualizar `build_training_snapshot.py`** — fazer upload automático do snapshot Gold Parquet para Supabase Storage ao final da execução
+2. **Atualizar `train_oracle.py`** — adicionar flag `--cloud` que baixa snapshots de Supabase Storage se `HW_CLOUD_BACKEND=supabase`
+3. **Atualizar `model_registry.py`** — `sync_registry_state_to_supabase()` chamado automaticamente após mutations no registry
+4. **Atualizar `ops_cycle.py`** — coletar métricas e fazer upload para Supabase ao final do ciclo
+5. **Mudar default** — `HW_CLOUD_BACKEND` default para `supabase` (com `local` como fallback se `SUPABASE_URL` não estiver setado)
+6. **Documentar** — criar `.env.supabase.example` com todas as vars necessárias
 
 ### Arquivos
-- `scripts/build_training_snapshot.py` — retornar métricas detalhadas
-- `scripts/ops_report.py` — incluir sección de snapshot metrics
-- `core/ops_metrics.py` — adicionar funcs de agregação
+- `scripts/build_training_snapshot.py` — adicionar `sync_directory_to_supabase()` após gerar Gold
+- `scripts/train_oracle.py` — adicionar `--cloud` + download de snapshots do Storage
+- `scripts/model_registry.py` — chamar `sync_registry_state_to_supabase()` após upsert/delete
+- `scripts/ops_cycle.py` — upload de métricas ao final do ciclo
+- `core/cloud_config.py` — inverter default para `supabase`
+- `.env.supabase.example` — template de variáveis
 
 ### Verificação
-- `python -m scripts.ops_report` mostra métricas de snapshot
-- `data/ops_metrics/snapshot_*.json` existe após execução
+- `HW_CLOUD_BACKEND=supabase python -m scripts.build_training_snapshot` faz upload do snapshot
+- `HW_CLOUD_BACKEND=supabase python -m scripts.train_oracle train --cloud` baixa e consome do Storage
+- Suite local passa com `HW_CLOUD_BACKEND=local` E com `HW_CLOUD_BACKEND=supabase`
+
+### Riscos
+- Train oracle sem connectivity não funciona em cloud mode — needs graceful fallback para local
+- Storage costs crescem com snapshots frequentes — implementar retention policy
 
 ---
 
-## Dependências
+## Ordem de Execução
 
-| Bloco | Depende de |
-|-------|------------|
-| 1. train_oracle readiness | Bloco 3 (ops_metrics) |
-| 2. Reconciliação Bronze | — |
-| 3. Observabilidade | — |
-
-**Ordem de execução:** 3 → 2 → 1 (Bloco 3 não tem dependências e fornece base de métricas para Bloco 1)
+| Bloco | Depende de | Prioridade |
+|-------|------------|------------|
+| 1. Checkpoint/State | — | **P0** (mais crítico) |
+| 2. Raw Ingest Landing | Bloco 1 | P1 |
+| 3. Command/Runtime | Blocos 1 + 2 | P2 |
 
 ---
 
-## Riscos
+## Riscos Globais
 
-1. **Parquet particionado**: `pd.read_parquet()` com diretório pode ter comportamento variável entre engines
-2. **Reconciliação agressiva**: pode rejeitar itens válidos se event_key for muito restritivo
-3. **Performance**: métricas pesadas em dataset grande podem impactar tempo de snapshot
+1. **Postgres como gargalo** — se firehose miner escrever checkpoint no Postgres a cada page, latency pode impactar throughput
+2. **Storage cost** — snapshots Parquet + raw NDJSON crescem rápido; retention policy é essencial
+3. **Dual write complexity** — manter SQLite + Postgres durante transição duplica estado; Bloco 3 deve consolidar
+4. **Auth/env vars** — `SUPABASE_SERVICE_ROLE_KEY` no CI/local; nunca commitar
 
 ---
 
 ## Recomendação Antes de Implementar
 
-**Aprovar a ordem de execução (3 → 2 → 1) e validar:**
-- Que `ops_report.py` atual existe e tem estrutura extensível para métricas de snapshot
-- Que não há breaking changes planejadas para `item_normalizer.py` ou `train_oracle.py` que impactem os ajustes
+**Validar que o schema atual do `supabase/schema.sql` está correto no Supabase remoto** (tabelas criadas e com permissões adequadas para service_role). Sem isso, Bloco 1 vai falhar em produção.
 
 ---
 
-*Plano criado: 2026-03-24*
+*Plano criado: 2026-03-25*

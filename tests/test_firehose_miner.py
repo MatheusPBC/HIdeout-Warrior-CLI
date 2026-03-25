@@ -1,15 +1,21 @@
+import json
+import logging
 import sqlite3
+from pathlib import Path
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 import typer
 
 from scripts.firehose_miner import (
+    _write_ndjson_landing,
     fetch_stash_page,
     run,
     ingest_stash_page,
     initialize_database,
     is_useful_item,
+    load_checkpoint,
     parse_price_note,
     update_checkpoint,
 )
@@ -316,3 +322,208 @@ def test_run_exits_cleanly_on_oauth_permission_error(tmp_path, monkeypatch) -> N
             max_pages=1,
             sleep_seconds=0.0,
         )
+
+
+# ─── Novas funcionalidades: Cloud Checkpoint + NDJSON Landing ──────────────────
+
+
+def test_load_checkpoint_prefers_supabase_over_sqlite(tmp_path, monkeypatch) -> None:
+    """Cloud configurado com checkpoint válido deve ser preferido sobre SQLite."""
+    conn = sqlite3.connect(str(tmp_path / "firehose.db"))
+    initialize_database(conn)
+
+    # SQLite com estado antigo
+    conn.execute(
+        "INSERT INTO miner_checkpoint (id, next_change_id, pages_processed, events_ingested, duplicates_skipped) "
+        "VALUES (1, 'sqlite-change', 5, 100, 10)"
+    )
+    conn.commit()
+    conn.close()
+
+    def _fake_supabase_checkpoint(config):
+        return {
+            "next_change_id": "cloud-change",
+            "pages_processed": 10,
+            "events_ingested": 200,
+            "duplicates_skipped": 20,
+        }
+
+    monkeypatch.setattr(
+        "scripts.firehose_miner.load_checkpoint_from_supabase",
+        _fake_supabase_checkpoint,
+    )
+    monkeypatch.setattr(
+        "core.cloud_config.load_cloud_config",
+        lambda: MagicMock(
+            backend="supabase",
+            is_configured=True,
+            project_url="https://demo.supabase.co",
+            service_role_key="key",
+        ),
+    )
+
+    result = load_checkpoint(conn)
+    assert result == "cloud-change"
+
+
+def test_load_checkpoint_falls_back_to_sqlite_when_cloud_unconfigured(
+    tmp_path, monkeypatch
+) -> None:
+    """Quando Supabase não está configurado, deve usar SQLite."""
+    conn = sqlite3.connect(str(tmp_path / "firehose.db"))
+    initialize_database(conn)
+
+    conn.execute(
+        "INSERT INTO miner_checkpoint (id, next_change_id, pages_processed, events_ingested, duplicates_skipped) "
+        "VALUES (1, 'local-change', 3, 50, 5)"
+    )
+    conn.commit()
+
+    def _fake_load_cloud_config():
+        from core.cloud_config import SupabaseCloudConfig
+
+        return SupabaseCloudConfig(backend="local")
+
+    monkeypatch.setattr("core.cloud_config.load_cloud_config", _fake_load_cloud_config)
+
+    result = load_checkpoint(conn)
+    assert result == "local-change"
+    conn.close()
+
+
+def test_load_checkpoint_warns_and_falls_back_when_cloud_returns_none(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """Cloud configurado mas sem checkpoint deve warnar e usar SQLite."""
+    conn = sqlite3.connect(str(tmp_path / "firehose.db"))
+    initialize_database(conn)
+
+    conn.execute(
+        "INSERT INTO miner_checkpoint (id, next_change_id, pages_processed, events_ingested, duplicates_skipped) "
+        "VALUES (1, 'fallback-change', 1, 10, 0)"
+    )
+    conn.commit()
+
+    def _fake_load_cloud_config():
+        from core.cloud_config import SupabaseCloudConfig
+
+        return SupabaseCloudConfig(
+            backend="supabase",
+            project_url="https://demo.supabase.co",
+            service_role_key="key",
+            storage_bucket="hw",
+        )
+
+    def _fake_supabase_none(config):
+        return None
+
+    monkeypatch.setattr("core.cloud_config.load_cloud_config", _fake_load_cloud_config)
+    monkeypatch.setattr(
+        "scripts.firehose_miner.load_checkpoint_from_supabase", _fake_supabase_none
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = load_checkpoint(conn)
+
+    assert result == "fallback-change"
+    assert "Supabase configurado mas checkpoint não encontrado" in caplog.text
+
+
+def test_write_ndjson_landing_creates_file_per_page(tmp_path) -> None:
+    """Cada página deve criar NDJSON em data/firehose_raw/{date}/{change_id}.ndjson."""
+    payload = {
+        "next_change_id": "next-abc",
+        "stashes": [
+            {"stash": "s1", "league": "Standard", "accountName": "acc", "items": []},
+        ],
+    }
+    change_id = "page-001"
+    collected_at = "2026-03-25T14:30:00Z"
+
+    import scripts.firehose_miner as fm
+
+    original_dir = fm.FIREHOSE_RAW_DIR
+    fm.FIREHOSE_RAW_DIR = tmp_path / "firehose_raw"
+    try:
+        _write_ndjson_landing(payload, change_id, collected_at)
+    finally:
+        fm.FIREHOSE_RAW_DIR = original_dir
+
+    expected_file = tmp_path / "firehose_raw" / "2026-03-25" / "page-001.ndjson"
+    assert expected_file.exists()
+
+    with expected_file.open() as f:
+        record = json.loads(f.readline())
+
+    assert record["change_id"] == "page-001"
+    assert record["collected_at"] == "2026-03-25T14:30:00Z"
+    assert record["next_change_id"] == "next-abc"
+
+
+def test_update_checkpoint_warns_on_cloud_sync_failure(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """update_checkpoint deve fazer warning quando sync cloud retorna False."""
+    conn = sqlite3.connect(str(tmp_path / "firehose.db"))
+    initialize_database(conn)
+
+    def _fake_sync_failure(**kwargs):
+        return False
+
+    monkeypatch.setattr(
+        "scripts.firehose_miner.sync_firehose_checkpoint_to_supabase",
+        _fake_sync_failure,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        update_checkpoint(
+            conn, "next-id", pages_delta=1, ingested_delta=0, duplicates_delta=0
+        )
+
+    assert "sync checkpoint para Supabase retornou False" in caplog.text
+
+
+def test_update_checkpoint_warns_on_cloud_exception(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """update_checkpoint deve fazer warning quando sync cloud lança exceção."""
+    conn = sqlite3.connect(str(tmp_path / "firehose.db"))
+    initialize_database(conn)
+
+    def _fake_sync_error(**kwargs):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(
+        "scripts.firehose_miner.sync_firehose_checkpoint_to_supabase", _fake_sync_error
+    )
+
+    with caplog.at_level(logging.WARNING):
+        update_checkpoint(
+            conn, "next-id", pages_delta=1, ingested_delta=0, duplicates_delta=0
+        )
+
+    assert "falha ao sincronizar checkpoint para Supabase" in caplog.text
+
+
+def test_ingest_creates_ndjson_landing_on_each_page(tmp_path) -> None:
+    """ingest_stash_page deve criar NDJSON landing para cada página processada."""
+    conn = sqlite3.connect(str(tmp_path / "firehose.db"))
+    initialize_database(conn)
+
+    landing_dir = tmp_path / "firehose_raw"
+    import scripts.firehose_miner as fm
+
+    original_dir = fm.FIREHOSE_RAW_DIR
+    fm.FIREHOSE_RAW_DIR = landing_dir
+    try:
+        ingest_stash_page(
+            conn,
+            {"stashes": [], "next_change_id": "next-x"},
+            change_id="ingest-test",
+            collected_at="2026-03-25T15:00:00Z",
+        )
+    finally:
+        fm.FIREHOSE_RAW_DIR = original_dir
+
+    ndjson_file = landing_dir / "2026-03-25" / "ingest-test.ndjson"
+    assert ndjson_file.exists()

@@ -7,6 +7,8 @@ from typing import Any, Dict, List
 import typer
 from rich import print
 
+from core.supabase_cloud import sync_file_to_supabase
+
 app = typer.Typer(help="Operational report builder")
 
 
@@ -188,6 +190,14 @@ def build(
         json.dumps(report_payload, ensure_ascii=True, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    try:
+        sync_file_to_supabase(
+            destination,
+            artifact_type="ops_report",
+            metadata={"generated_at_utc": report_payload["generated_at_utc"]},
+        )
+    except Exception:
+        pass
 
     print(f"[bold cyan]Ops report salvo[/bold cyan] {destination}")
     print(

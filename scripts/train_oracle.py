@@ -20,6 +20,11 @@ from core.api_integrator import MarketAPIClient
 from core.item_normalizer import ITEM_FAMILIES, normalize_trade_item
 from core.meta_analyzer import LadderAnalyzer, MetaScores, calculate_meta_utility_score
 from core.ml_oracle import FAMILY_FEATURE_SCHEMAS, PricePredictor
+from core.supabase_cloud import (
+    download_file_from_supabase,
+    list_artifacts_from_supabase,
+    sync_file_to_supabase,
+)
 from scripts.model_registry import register_and_evaluate_candidate
 
 
@@ -354,6 +359,18 @@ def persist_model_metadata(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    try:
+        sync_file_to_supabase(
+            metadata_path,
+            artifact_type="model_metadata",
+            metadata={
+                "source": source,
+                "league": league,
+                "snapshot_date": snapshot_date or "",
+            },
+        )
+    except Exception:
+        pass
     return metadata_path
 
 
@@ -542,6 +559,67 @@ def _apply_training_filters(
     return df
 
 
+def fetch_latest_snapshot_from_cloud(
+    local_dest_dir: Path,
+    artifact_type: str = "snapshot_gold",
+    snapshot_date: Optional[str] = None,
+) -> Optional[Path]:
+    """Baixa snapshot mais recente do Supabase Storage.
+
+    Args:
+        local_dest_dir: diretório local para salvar o snapshot
+        artifact_type: tipo de artefato (snapshot_gold, snapshot_silver, snapshot_bronze)
+        snapshot_date: se fornecido, baixa snapshot específico; senão, pega o mais recente
+
+    Returns:
+        Path do diretório baixado ou None se falhou/não encontrou
+    """
+    artifacts = list_artifacts_from_supabase(artifact_type)
+    if not artifacts:
+        return None
+
+    if snapshot_date:
+        filtered = [
+            a
+            for a in artifacts
+            if a.get("metadata", {}).get("snapshot_date") == snapshot_date
+        ]
+        if not filtered:
+            return None
+        candidates = filtered
+    else:
+        candidates = artifacts
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda a: a.get("object_path", ""),
+        reverse=True,
+    )
+    chosen = candidates[0]
+    object_path = chosen.get("object_path", "")
+    if not object_path:
+        return None
+
+    local_dest_dir.mkdir(parents=True, exist_ok=True)
+
+    gold_dir = local_dest_dir / "gold"
+    gold_dir.mkdir(parents=True, exist_ok=True)
+
+    cloud_path = object_path.replace(f"hideout-warrior/{artifact_type}/", "")
+    local_file = gold_dir / Path(cloud_path).name
+
+    success = download_file_from_supabase(
+        remote_path=cloud_path,
+        local_destination=local_file,
+        artifact_type=artifact_type,
+    )
+    if success:
+        return gold_dir
+    return None
+
+
 def _trade_item_from_firehose_row(row: Mapping[str, Any]) -> Optional[dict]:
     raw_payload = row["raw_item_json"]
     if not raw_payload:
@@ -640,7 +718,30 @@ def fetch_training_data_from_parquet(
 ) -> pd.DataFrame:
     parquet_target = Path(parquet_path)
     if not parquet_target.exists():
-        raise FileNotFoundError(f"Caminho parquet não encontrado: {parquet_path}")
+        # Cloud-first: try to download from Supabase
+        from core.cloud_download import download_directory_from_supabase
+        from core.cloud_config import load_cloud_config
+
+        config = load_cloud_config()
+        if config.is_configured:
+            print(
+                f"[cyan]Parquet não encontrado localmente, tentando download do cloud: {parquet_path}[/cyan]"
+            )
+            parent_dir = parquet_target.parent
+            parent_dir.mkdir(parents=True, exist_ok=True)
+
+            downloaded = download_directory_from_supabase(
+                artifact_type="training_snapshots",
+                prefix=str(parquet_target),
+                output_dir=parent_dir,
+                config=config,
+            )
+            if not downloaded:
+                raise FileNotFoundError(
+                    f"Caminho parquet não encontrado localmente e download do cloud falhou: {parquet_path}"
+                )
+        else:
+            raise FileNotFoundError(f"Caminho parquet não encontrado: {parquet_path}")
 
     try:
         frame = pd.read_parquet(str(parquet_target))
@@ -981,6 +1082,14 @@ def train_xgboost_oracle(
             registry_path=Path(registry_path),
         )
         report["registry_decision"] = decision
+        try:
+            sync_file_to_supabase(
+                Path(str(report["model_path"])),
+                artifact_type="trained_model",
+                metadata={"family": str(report["family"]), "run_id": run_id},
+            )
+        except Exception:
+            pass
 
     metadata_path = persist_model_metadata(
         source=source,
@@ -1037,13 +1146,51 @@ if __name__ == "__main__":
             "--registry-path",
             help="Model registry path",
         ),
+        cloud: bool = typer.Option(
+            False,
+            "--cloud",
+            help="Baixar snapshot mais recente do Supabase Storage antes de treinar",
+        ),
+        cloud_snapshot_date: Optional[str] = typer.Option(
+            None,
+            "--cloud-snapshot-date",
+            help="Data específica do snapshot cloud (YYYY-MM-DD). Se omitido, usa o mais recente.",
+        ),
     ):
+        effective_parquet_path = parquet_path
+        if cloud:
+            print(
+                "[cyan]Modo cloud ativado: buscando snapshot do Supabase Storage...[/cyan]"
+            )
+            from core.cloud_config import load_cloud_config
+
+            cfg = load_cloud_config()
+            if cfg.enabled and cfg.is_configured:
+                downloaded = fetch_latest_snapshot_from_cloud(
+                    local_dest_dir=Path("data/training_snapshots"),
+                    artifact_type="snapshot_gold",
+                    snapshot_date=cloud_snapshot_date,
+                )
+                if downloaded:
+                    effective_parquet_path = str(downloaded)
+                    print(
+                        f"[green]Snapshot cloud baixado em: {effective_parquet_path}[/green]"
+                    )
+                else:
+                    print(
+                        "[yellow]Nenhum snapshot encontrado no cloud; usando fonte local.[/yellow]"
+                    )
+            else:
+                print(
+                    "[yellow]Cloud backend não configurado; usando fonte local.[/yellow]"
+                )
+
         train_xgboost_oracle(
             league=league,
             items_per_base=items_per_base,
             source=source,
             sqlite_path=sqlite_path,
-            parquet_path=parquet_path,
+            parquet_path=effective_parquet_path,
             promotion_max_rmse_ratio=promotion_max_rmse_ratio,
             promotion_min_abs_improvement=promotion_min_abs_improvement,
             registry_path=registry_path,

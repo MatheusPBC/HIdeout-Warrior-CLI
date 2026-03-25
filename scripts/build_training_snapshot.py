@@ -17,6 +17,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from core.item_normalizer import normalize_trade_item
 from core.ops_metrics import emit_snapshot_metrics
+from core.supabase_cloud import (
+    sync_directory_to_supabase,
+    sync_snapshot_summary_to_supabase,
+)
 from scripts.train_oracle import (
     _trade_item_from_firehose_row,
     parse_trade_item_to_features,
@@ -737,6 +741,25 @@ def build_training_snapshot(
         run_id=f"snapshot_{effective_snapshot_date}",
     )
     print(f"[dim]Métricas de snapshot salvas em {snapshot_metrics_path}[/dim]")
+    try:
+        sync_directory_to_supabase(
+            target_root / "bronze",
+            artifact_type="snapshot_bronze",
+            metadata={"snapshot_date": effective_snapshot_date, "layer": "bronze"},
+        )
+        sync_directory_to_supabase(
+            target_root / "silver",
+            artifact_type="snapshot_silver",
+            metadata={"snapshot_date": effective_snapshot_date, "layer": "silver"},
+        )
+        sync_directory_to_supabase(
+            target_root / "gold",
+            artifact_type="snapshot_gold",
+            metadata={"snapshot_date": effective_snapshot_date, "layer": "gold"},
+        )
+        sync_snapshot_summary_to_supabase(summary)
+    except Exception:
+        pass
     return summary
 
 

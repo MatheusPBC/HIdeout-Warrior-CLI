@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from core.supabase_cloud import sync_file_to_supabase
+
 
 DEFAULT_OPS_METRICS_DIR = Path("data/ops_metrics")
 
@@ -120,4 +122,13 @@ def emit_snapshot_metrics(
             pass
         raise
 
-    return metrics_dir / f"snapshot_{safe_date}.json"
+    target_file = metrics_dir / f"snapshot_{safe_date}.json"
+    try:
+        sync_file_to_supabase(
+            target_file,
+            artifact_type="snapshot_metrics",
+            metadata={"snapshot_date": safe_date, "run_id": safe_run_id},
+        )
+    except Exception:
+        pass
+    return target_file
