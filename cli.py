@@ -675,6 +675,142 @@ def flip_plan(
         _render_flip_plan(plan)
 
 
+@app.command("craft-plan")
+def craft_plan(
+    niche: str = typer.Option(
+        "es_influence_shield",
+        "--niche",
+        help="Nicho de craft (por enquanto: es_influence_shield)",
+    ),
+    output_format: str = typer.Option("table", "--format", help="Formato: table|json"),
+    output: str = typer.Option("", "--output", "-o", help="Salvar saída em arquivo"),
+):
+    """
+    Craft Planner: compara métodos de crafting e calcula EV para um nicho específico.
+
+    MVP atual: compara Dense Fossil vs Harvest Reforge Defence vs Essence
+    para o nicho 'es_influence_shield' (Influenced Energy Shield).
+    """
+    from core.probability_engine import create_engine
+
+    valid_niches = ["es_influence_shield"]
+    if niche not in valid_niches:
+        raise typer.BadParameter(
+            f"Nicho '{niche}' não suportado no MVP. Opções: {', '.join(valid_niches)}"
+        )
+
+    if output_format not in {"table", "json"}:
+        raise typer.BadParameter("Formato inválido. Use 'table' ou 'json'.")
+
+    engine = create_engine(niche=niche)
+    results = engine.compare_methods()
+
+    if output_format == "json":
+        payload = json.dumps(
+            {
+                "metadata": engine.get_metadata(),
+                "methods": [
+                    {
+                        "method": r.method_name,
+                        "hit_probability": round(r.hit_probability, 2),
+                        "expected_cost": round(r.expected_cost, 1),
+                        "brick_risk": round(r.brick_risk, 2),
+                        "ev_net_value": round(r.ev_net_value, 1),
+                        "recommended": r.recommended,
+                        "notes": r.notes,
+                        # Rastreabilidade de fonte
+                        "data_source": r.data_source,
+                        "used_fallback": r.used_fallback,
+                        "fallback_reason": r.fallback_reason,
+                    }
+                    for r in results
+                ],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        if output:
+            _save_output(output, payload)
+            console.print(f"[green]Saída salva em: {output}[/green]")
+        else:
+            typer.echo(payload)
+        return
+
+    # Render table
+    table = Table(
+        title=f"Craft Plan MVP - {niche}",
+        expand=True,
+    )
+    table.add_column("Método", style="cyan")
+    table.add_column("Hit %", justify="right", style="green")
+    table.add_column("Custo EV", justify="right", style="yellow")
+    table.add_column("Brick Risk", justify="right", style="red")
+    table.add_column("EV Líquido", justify="right", style="bold")
+    table.add_column("Recomendado", justify="center", style="magenta")
+    table.add_column("Notas", style="dim")
+
+    for result in results:
+        rec_icon = "✅" if result.recommended else "  "
+        ev_style = "bold green" if result.ev_net_value > 0 else "red"
+        table.add_row(
+            result.method_name,
+            f"{result.hit_probability:.0%}",
+            f"{result.expected_cost:.1f}c",
+            f"{result.brick_risk:.0%}",
+            f"[{ev_style}]{result.ev_net_value:.1f}c[/{ev_style}]",
+            rec_icon,
+            result.notes[:60] + "..." if len(result.notes) > 60 else result.notes,
+        )
+
+    metadata = engine.get_metadata()
+
+    console.print(
+        Panel(
+            Text("Craft Plan MVP - Probability Engine v1.0", style="bold cyan"),
+            border_style="cyan",
+        )
+    )
+    console.print(
+        Text(
+            f"Nicho: {niche} | Alvo: Spell Suppression + Maximum Energy Shield + Resist",
+            style="dim",
+        )
+    )
+
+    # Warning dinâmico baseado no estado real do fallback
+    if metadata["used_fallback"]:
+        console.print(
+            Panel(
+                Text(
+                    f"⚠️ FALLBACK ATIVO: {metadata['fallback_reason']}",
+                    style="yellow",
+                ),
+                border_style="yellow",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                Text("📊 Usando dados RePoE/Community validados", style="green"),
+                border_style="green",
+            )
+        )
+    console.print("")
+    console.print(table)
+
+    console.print("")
+    console.print(
+        Panel(
+            Text(
+                "EV Líquido = (P_hit × Valor_delta) - Custo_base - (P_brick × Custo_base × 0.4)",
+                style="dim",
+            ),
+            title="[bold]Fórmula do EV[/bold]",
+            border_style="dim",
+        )
+    )
+
+
 @app.command()
 def meta_sync():
     """Sincroniza economia (Módulo C)."""

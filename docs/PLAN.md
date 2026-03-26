@@ -1,90 +1,172 @@
-# Hideout Warrior CLI - Plano de Migração Supabase — Fechamento
+# Hideout Warrior CLI - MVP do `craft-plan`
 
 ## Visão Geral
 
-Migração local-first → Supabase cloud. Estado atual: **Fase 2 concluída** (2026-03-25).
-Este plano cobre apenas o fechamento final.
+Próximo épico após a migração Supabase: adicionar um trilho novo de high-end crafting sem quebrar o fluxo atual de `flip-plan`.
+
+Decisões já aprovadas:
+- manter `flip-plan` para fix-up flips
+- criar `craft-plan` como comando novo
+- MVP focado em **probability engine + EV básico**
+- primeiro nicho: **`es_influence_shield`**
+- fonte inicial: **RePoE/export versionado**
 
 ---
 
-## Status: Blocos Anteriores ✅ Concluídos
+## Fora do MVP
 
-| Bloco | Descrição | Status |
-|-------|-----------|--------|
-| 1 | Checkpoint/State Migration (SQLite → Postgres) | ✅ Concluído |
-| 2 | Raw Ingest Landing (NDJSON → Storage + manifest) | ✅ Concluído |
-| 3 | Runtime Cloud-Aware (default=supabase, --cloud flags) | ✅ Concluído |
-
-Entregas verificadas: 226 testes passed, py_compile limpo.
+Não entra nesta etapa:
+- merge mode
+- recombinator advanced logic
+- quality/enchant/implicit flips
+- multiplos nichos
+- actions high-end completas além do mínimo necessário
 
 ---
 
-## Bloco A: Alinhamento Docs / Estado Atual
+## Bloco 1: CLI `craft-plan` isolado
 
 ### Objetivo
-Sincronizar `docs/PLAN.md` com o estado real já entregue. É o que este documento faz.
+Criar o comando novo sem quebrar `flip-plan`.
 
-### Ações
-- [ ] Marcar Blocos 1-3 como ✅ Concluídos (este arquivo)
-- [ ] Confirmar que `CHANGELOG.md` reflete todos os deliverables da Fase 2
+### O que fazer
+1. Adicionar `craft-plan` em `cli.py`
+2. Criar o entrypoint básico do planner novo
+3. Manter `flip-plan` intacto
+
+### Arquivos prováveis
+- `cli.py`
+- `core/craft_planner.py`
+- `core/models.py`
 
 ### Verificação
-- `docs/PLAN.md` versões anteriores não contradizem o estado atual
+- `python cli.py craft-plan --help` funciona
+- `python cli.py flip-plan --help` continua funcionando
+
+### Risco principal
+- acoplamento indevido com `flip-plan`
 
 ---
 
-## Bloco B: Validação Remota — Schema + Health/Bootstrap
+## Bloco 2: `core/probability_engine.py` MVP
 
 ### Objetivo
-Confirmar que o Supabase remoto tem schema e bootstrap funcionais.
+Substituir heurística estática mínima por probabilidade real/estimada com EV básico.
 
-### Ações
-1. **`scripts/supabase_health_check.py`** — executar contra o projeto remoto real
-   - Verificar conectividade, tabelas acessíveis, storage buckets
-2. **`scripts/bootstrap_supabase.py --dry-run`** — confirmar que não há erros de schema
-3. **`supabase/schema.sql` vs. remoto** — validar que todas as tabelas/índices existem com colunas corretas:
-   - `artifact_catalog`, `active_models`, `snapshot_runs`, `firehose_checkpoints`, `firehose_raw_manifest`
-   - Colunas de governança: `checksum_validated`, `last_verified_at`, `retention_expires_at`, `deleted_at`
+### Escopo
+Métodos iniciais:
+- `Dense Fossil`
+- `Harvest Reforge Defence`
+- `Essence`
+
+Saídas mínimas:
+- `hit_probability`
+- `expected_cost`
+- `brick_risk`
+- `data_source`
+- `used_fallback`
+
+### Arquivos prováveis
+- `core/probability_engine.py`
+- `core/evaluator.py`
+- dados versionados em diretório local do projeto
 
 ### Verificação
-```bash
-python -m scripts.supabase_health_check
-python -m scripts.bootstrap_supabase --dry-run
-```
-- Ambos retornam **exit 0** sem erros
+- engine retorna probabilidades entre `0.0` e `1.0`
+- fallback explícito quando RePoE não cobrir um caso
+
+### Risco principal
+- cobertura incompleta do RePoE para fossil/influenced crafting
 
 ---
 
-## Bloco C: Verificação Operacional Final + Decisão de Encerramento
+## Bloco 3: Perfil `es_influence_shield`
 
 ### Objetivo
-Confirmar que o pipeline operacional funciona end-to-end com Supabase cloud e declarar migração como consolidada.
+Focar o MVP em um único nicho high-end com comparação simples de métodos por EV.
 
-### Ações
-1. **Checkpoint cloud-readiness**: `python -m scripts.firehose_miner run --max-pages 1` persiste em `firehose_checkpoints` remoto
-2. **Raw landing**: `data/firehose_raw/` recebe NDJSON por página
-3. **Upload operacional**: `python -m scripts.firehose_to_supabase --dry-run` lista uploads sem erro
-4. **Retention dry-run**: `python -m scripts.retention_policy --dry-run` executa sem erro
+### Escopo
+Perfil inicial:
+- `es_influence_shield`
 
-### Critério de Encerramento (Migração Consolidadas)
+Métodos comparados:
+- Dense Fossil
+- Harvest Reforge Defence
+- Essence
 
-**A migração será declarada consolidada quando TODOS os itens abaixo forem verdadeiros:**
+Output mínimo do `craft-plan`:
+- método
+- hit%
+- expected_cost (chaos)
+- brick_risk
+- recommended (Y/N)
 
-| # | Critério | Como verificar |
-|---|----------|----------------|
-| 1 | `supabase_health_check` retorna OK | `python -m scripts.supabase_health_check` exit 0 |
-| 2 | `bootstrap_supabase --dry-run` sem erros | exit 0, sem diff de schema |
-| 3 | Suite de testes passa (226+) | `pytest -q` |
-| 4 | Checkpoint persiste no Supabase (não só SQLite) | Query `firehose_checkpoints` após miner run |
-| 5 | Raw landing NDJSON existe após páginas | `ls data/firehose_raw/` não vazio |
+### Arquivos prováveis
+- `core/craft_planner.py`
+- `core/probability_engine.py`
+- `core/models.py`
+- `core/flip_planner.py` apenas se precisar extrair lógica compartilhada
 
-### Risco Residual Curto
+### Verificação
+- `craft-plan` gera comparação de EV para `es_influence_shield`
+- um método sai como recomendado com justificativa simples
 
-| Risco | Probabilidade | Impacto | Mitigação |
-|-------|---------------|---------|-----------|
-| Schema drift entre local `schema.sql` e remoto | Baixa | Média | Bloco B cobre isso; revisar antes de cada deploy |
-| Retention policy não executar em produção | Baixa | Baixa | `cleanup_firehose_raw.py` + `retention_policy.py` prontos; agendar via cron/CI |
+### Risco principal
+- modelagem simplificada demais do nicho gerar saída enganosa
 
 ---
 
-*Plano atualizado para fechamento: 2026-03-26*
+## Bloco 4: Integração e Verificação
+
+### Objetivo
+Garantir que o MVP nasce sem regressão no fluxo atual.
+
+### O que fazer
+1. Cobrir `craft-plan` e `probability_engine` com testes
+2. Confirmar que `flip-plan` não mudou de comportamento
+3. Validar output básico do nicho inicial
+
+### Arquivos prováveis
+- `tests/test_craft_plan.py`
+- `tests/test_probability_engine.py`
+- ajustes em testes existentes se necessário
+
+### Verificação
+- suíte alvo do novo MVP passa
+- `pytest -q` continua verde
+
+### Risco principal
+- regressão indireta no planner atual
+
+---
+
+## Critério de Aceite do MVP
+
+O MVP será considerado pronto quando:
+
+1. `craft-plan` existir como comando separado
+2. `flip-plan` continuar intacto
+3. o nicho `es_influence_shield` gerar comparação de EV entre 3 métodos
+4. o engine indicar claramente quando usou fallback
+5. a suíte de testes passar
+
+---
+
+## Ordem de Execução
+
+| Bloco | Prioridade | Dependência |
+|-------|------------|-------------|
+| 1. CLI `craft-plan` | P0 | — |
+| 2. `probability_engine.py` MVP | P0 | — |
+| 3. Perfil `es_influence_shield` | P1 | 1 + 2 |
+| 4. Integração e Verificação | P1 | 1 + 2 + 3 |
+
+---
+
+## Risco Global do MVP
+
+**Cobertura incompleta do RePoE para métodos de craft específicos** pode exigir fallback em parte dos cenários. Isso é aceitável no MVP, desde que o output deixe claro quando o fallback foi usado.
+
+---
+
+*Plano atualizado para MVP do `craft-plan`: 2026-03-26*
