@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## 2026-03-26
+
+- **Bloco 6 completo** - Nicho `es_influence_shield` endurtecido com RePoE real.
+- **Mod IDs mapeados corretamente** no `core/data_parser.py`:
+  - Spell Suppression: `ChanceToSuppressSpells2/3/4` (suffix)
+  - ES% Prefix: `LocalIncreasedEnergyShieldPercent8` (e tiers)
+- **Spawn weights validados**:
+  - Tag `dex_int_armour` para ES Shield (peso 500)
+  - Dense Fossil usa tag `defences` (com 's')
+  - Novos métodos: `get_spawn_weight_for_tag`, `get_total_spawn_weight_by_groups`
+- **Hit probability calculada com dados RePoE reais**:
+  - Dense Fossil: ~30% (1500/5000 do pool `ChanceToSuppressSpells`)
+  - Harvest Reforge: ~30% (mesmo pool)
+  - Essence: mantido fallback (pool não mapeado no RePoE)
+- **`data_source` melhorado**:
+  - `repoe_verified`: mods encontrados com peso > 0
+  - `repoe_fallback`: graceful degradation com logs explícitos
+- **Parser atualizado**:
+  - Corrigido de `generation_weights` para `spawn_weights`
+  - Adicionada extração de `generation_type`, `groups`, `stats`
+- **Testes**: 275 passed, nenhuma regressão.
+
 ## 2026-03-25
 
 - Evoluída a migração Supabase para a Fase 2 com scripts operacionais cloud-native: `scripts/bootstrap_supabase.py`, `scripts/supabase_health_check.py`, `scripts/cleanup_firehose_raw.py` e `scripts/retention_policy.py`, todos com foco em dry-run/checks seguros por padrão.

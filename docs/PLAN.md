@@ -234,3 +234,118 @@ P(hit) = weight(target_mod) / total_essence_mods_for(base_type)
 ---
 
 *Plano atualizado com Bloco 5 (RePoE real): 2026-03-26*
+
+---
+
+## Bloco 6: Endurecer o Nicho `es_influence_shield`
+
+### Objetivo
+
+Reduzir fallback, melhorar mapeamento de mod IDs do RePoE e refinar o cálculo por contexto/pool para o nicho `es_influence_shield` — sem reescrever o sistema inteiro.
+
+---
+
+### O que entra
+
+1. **Mapear os 3–5 mod IDs mais relevantes** do RePoE para `es_influence_shield`:
+   - Prefix: `Maximum Energy Shield` (targeado pelo pool de Essence)
+   - Suffix: `Spell Suppression` (target do Dense Fossil / Harvest)
+   - Verificar se há mods de `+1 to Level of all Spell Skill Gems` (influência) que competem no pool
+
+2. **Validar e corrigir os pesos** do RePoE para cada mod ID identificado:
+   - Conferir que `weight(target_mod) > 0` no RePoE
+   - Se peso = 0, investigar se o mod existe com nome diferente ou se é exilado no ladder
+   - Log explícito quando peso = 0 (em vez de fallback silencioso)
+
+3. **Refinar pool/context para Essence**:
+   - O pool de Essence é restrito a mods do tipo `essence` filtrados por base_type
+   - Se o RePoE expõe `mod_group` ou `gen_type`, usar para filtrar o denominador correto
+   - Confirmar se `Maximum Energy Shield` é de fato prefix-only no pool de Essence de ES shield
+
+4. **Refinar pool/context para Dense Fossil**:
+   - Tag `defence` inclui vários mods que não são elegíveis em shield (ex.: evasion, armor)
+   - Se o RePoE expõe `item_classes`, usar para filtrar o denominador para `ES shield` especificamente
+
+5. **Melhorar `data_source` e `used_fallback`**:
+   - `data_source` = `"repoe_verified"` quando mod ID foi validado com peso > 0
+   - `data_source` = `"repoe_fallback"` quando houve graceful degradation
+   - `used_fallback` = `true` apenas quando houve interpolação ou valor estimado
+
+---
+
+### O que continua fora do escopo
+
+- Outros nichos além de `es_influence_shield`
+- Lógica de brick risk por mod (permanece fallback conservativo)
+- Cache persistente de pesos RePoE
+- Merge mode ou recombinator
+- Dense Fossil + Harvest com-tags (ainda não mapeado)
+
+---
+
+### Arquivos prováveis
+
+- `core/probability_engine.py` — ajuste na lógica de `_get_method_params()` e no cálculo de denominador por contexto
+- `core/data_parser.py` — adicionar método de filtragem por `item_classes` / `mod_group` se disponível no RePoE
+- `core/craft_planner.py` — ajustar output de `data_source` e `used_fallback`
+
+---
+
+### Verificação mínima
+
+1. `craft-plan` para `es_influence_shield` retorna `data_source: "repoe_verified"` para todos os 3 métodos (sem fallback)
+2. Nenhum método no nicho ativa `used_fallback: true`
+3. Logs não mostram `weight = 0` para os mods-alvo identificados
+4. `hit_probability` de Essence para `Maximum Energy Shield` é diferente (e maior) que o fallback anterior
+
+---
+
+### Risco principal
+
+**Mod ID errado no RePoE**: se os identificadores de mod não corresponderem exatamente aos nomes internos do jogo, o peso será 0 e o fallback permanecerá. Mitigação: validação explícita com log antes de qualquer cálculo.
+
+---
+
+## Ordem de Execução (Atualizada)
+
+| Bloco | Prioridade | Dependência | Status |
+|-------|------------|-------------|--------|
+| 1. CLI `craft-plan` | P0 | — | ✅ Completo |
+| 2. `probability_engine.py` MVP | P0 | — | ✅ Completo |
+| 3. Perfil `es_influence_shield` | P1 | 1 + 2 | ✅ Completo |
+| 4. Integração e Verificação | P1 | 1 + 2 + 3 | ✅ Completo |
+| 5. RePoE Real | P0 | 3 | ✅ Completo |
+| **6. Endurecer `es_influence_shield`** | **P1** | **5** | ✅ **Completo** |
+
+---
+
+## Bloco 6 - Completo ✅
+
+### Realizações
+
+1. **Mod IDs mapeados corretamente:**
+   - Spell Suppression: `ChanceToSuppressSpells2`, `ChanceToSuppressSpells3`, `ChanceToSuppressSpells4`
+   - ES% Prefix: `LocalIncreasedEnergyShieldPercent8` (e tiers)
+
+2. **Spawn weights validados:**
+   - Tag correta para ES Shield: `dex_int_armour` (peso 500)
+   - Dense Fossil usa tag: `defences` (com 's')
+   - Pool total do grupo `ChanceToSuppressSpells`: 5000
+
+3. **Hit probability calculada com RePoE real:**
+   - Dense Fossil: ~30% (1500/5000)
+   - Harvest Reforge: ~30% (mesmo pool)
+   - Essence: fallback (pool não mapeado)
+
+4. **`data_source` melhorado:**
+   - `repoe_verified`: mods encontrados com peso > 0
+   - `repoe_fallback`: graceful degradation
+   - Logs explícitos quando weight = 0
+
+5. **Testes:**
+   - 275 testes passando
+   - Nenhuma regressão
+
+---
+
+*Plano atualizado - Bloco 6 completo: 2026-03-26*

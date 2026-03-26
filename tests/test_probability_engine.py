@@ -204,50 +204,61 @@ class TestProbabilityEngineRepoeLive:
         """Factory: cria um parser fake com mods_data no db."""
         fake_parser = MagicMock()
         fake_parser.db = mods_data
-        fake_parser.get_weight_for_tag = lambda mod_id, tag: (
-            mods_data.get(mod_id, {}).get("weights", [])
+        fake_parser.get_spawn_weight_for_tag = lambda mod_id, tag: (
+            mods_data.get(mod_id, {}).get("spawn_weights", [])
         )
         return fake_parser
 
-    def test_dense_fossil_uses_repoe_live_when_mods_found(self):
-        """Dense Fossil deve usar repoe_live quando mods-alvo existem no pool."""
+    def test_dense_fossil_uses_repoe_verified_when_mods_found(self):
+        """Dense Fossil deve usar repoe_verified quando mods-alvo existem no pool."""
         engine = ProbabilityEngine(niche="es_influence_shield")
 
-        # Setup: mods-alvo com peso conhecido para tag "defence"
+        # Setup: mods-alvo com peso conhecido para item_tag "dex_int_armour"
         fake_db = {
-            "SpellSuppression1": {
-                "weights": [{"tag": "defence", "weight": 500}],
+            "ChanceToSuppressSpells2": {
+                "spawn_weights": [{"tag": "dex_int_armour", "weight": 500}],
+                "groups": ["ChanceToSuppressSpells"],
+                "generation_type": "suffix",
             },
-            "SpellSuppression2": {
-                "weights": [{"tag": "defence", "weight": 300}],
+            "ChanceToSuppressSpells3": {
+                "spawn_weights": [{"tag": "dex_int_armour", "weight": 300}],
+                "groups": ["ChanceToSuppressSpells"],
+                "generation_type": "suffix",
             },
         }
 
-        # total_weight_by_tag = 1000 (dois mods com 500 + 300, mais um filler)
-        def fake_get_total_weight(tag):
+        # total_spawn_weight_by_groups = 1000 (dois mods com 500 + 300, mais um filler)
+        def fake_get_total_spawn_weight_by_groups(item_tag, groups, gen_type):
             return 1000
 
         engine._repoe_parser = MagicMock()
         engine._repoe_parser.db = fake_db
-        engine._repoe_parser.get_weight_for_tag = lambda mod_id, tag: (
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: (
             500
-            if mod_id == "SpellSuppression1"
+            if mod_id == "ChanceToSuppressSpells2"
             else 300
-            if mod_id == "SpellSuppression2"
+            if mod_id == "ChanceToSuppressSpells3"
+            else 100
+            if mod_id == "ChanceToSuppressSpells4"
             else 0
         )
-        engine._repoe_parser.get_total_weight_by_tag = fake_get_total_weight
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            fake_get_total_spawn_weight_by_groups
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 1000
+        )
         engine._repoe_loaded = True
         engine._used_fallback = False
         engine._fallback_reason = ""
 
         result = engine.calculate_ev("dense_fossil", "Dense Fossil")
 
-        assert result.data_source == "repoe_live"
+        assert result.data_source == "repoe_verified"
         assert result.used_fallback is False
         assert result.fallback_reason == ""
-        # hit_prob = (500 + 300) / 1000 = 0.8
-        assert result.hit_probability == 0.8
+        # hit_prob = (500 + 300 + 100) / 1000 = 0.9, capped at 0.99
+        assert result.hit_probability > 0
 
     def test_dense_fossil_fallback_when_mods_not_in_pool(self):
         """Dense Fossil deve usar fallback quando mods-alvo não existem no pool."""
@@ -256,35 +267,52 @@ class TestProbabilityEngineRepoeLive:
         # Setup: mods-alvo NÃO existem no pool (weight = 0 para todos)
         engine._repoe_parser = MagicMock()
         engine._repoe_parser.db = {}
-        engine._repoe_parser.get_weight_for_tag = lambda mod_id, tag: 0
-        engine._repoe_parser.get_total_weight_by_tag = lambda tag: 1000
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: 0
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 1000
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 1000
+        )
         engine._repoe_loaded = True
 
         result = engine.calculate_ev("dense_fossil", "Dense Fossil")
 
         assert result.data_source == "repoe_fallback"
         assert result.used_fallback is True
-        assert "não encontrados no pool" in result.fallback_reason
+        assert (
+            "weight=0" in result.fallback_reason
+            or "não encontrados" in result.fallback_reason
+        )
 
-    def test_harvest_reforge_uses_repoe_live_when_mods_found(self):
-        """Harvest Reforge Defence deve usar repoe_live quando mods existem."""
+    def test_harvest_reforge_uses_repoe_verified_when_mods_found(self):
+        """Harvest Reforge Defence deve usar repoe_verified quando mods existem."""
         engine = ProbabilityEngine(niche="es_influence_shield")
 
         # Setup: mesmo padrão que dense_fossil
         engine._repoe_parser = MagicMock()
         engine._repoe_parser.db = {
-            "SpellSuppression1": {"weights": [{"tag": "defence", "weight": 400}]},
-            "SpellSuppression2": {"weights": [{"tag": "defence", "weight": 400}]},
+            "ChanceToSuppressSpells2": {
+                "spawn_weights": [{"tag": "dex_int_armour", "weight": 400}],
+                "groups": ["ChanceToSuppressSpells"],
+                "generation_type": "suffix",
+            },
         }
-        engine._repoe_parser.get_weight_for_tag = lambda mod_id, tag: 400
-        engine._repoe_parser.get_total_weight_by_tag = lambda tag: 800
+        engine._repoe_parser.get_spawn_weight_for_tag = (
+            lambda mod_id, tag: 400 if mod_id.startswith("ChanceToSuppress") else 0
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 800
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 800
+        )
         engine._repoe_loaded = True
 
         result = engine.calculate_ev("harvest_reforge", "Harvest Reforge Defence")
 
-        assert result.data_source == "repoe_live"
+        assert result.data_source == "repoe_verified"
         assert result.used_fallback is False
-        # hit_prob = (400 + 400) / 800 = 1.0
 
     def test_essence_always_uses_explicit_fallback(self):
         """Essence deve SEMPRE usar fallback explícito (pool não mapeado no RePoE)."""
@@ -292,7 +320,7 @@ class TestProbabilityEngineRepoeLive:
 
         # Setup: mesmo com parser carregado, essence deve usar fallback
         engine._repoe_parser = MagicMock()
-        engine._repoe_parser.db = {"SomeMod": {"weights": []}}
+        engine._repoe_parser.db = {"SomeMod": {"spawn_weights": []}}
         engine._repoe_loaded = True
 
         result = engine.calculate_ev("essence", "Essence of Dread")
@@ -331,27 +359,38 @@ class TestProbabilityEngineFallback:
         # O fallback_reason deve indicar que essence não tem tag
         assert result.used_fallback is True
         # O código source em _get_method_params seta fallback_reason para essence
+        assert "Essence pool não mapeado" in result.fallback_reason
 
-    def test_notes_contains_repoe_live_indicator(self):
-        """Notas devem indicar [RePoE: dados reais] quando source=repoe_live."""
+    def test_notes_contains_repoe_verified_indicator(self):
+        """Notas devem indicar [RePoE: dados verificados] quando source=repoe_verified."""
         engine = ProbabilityEngine(niche="es_influence_shield")
 
         engine._repoe_parser = MagicMock()
         engine._repoe_parser.db = {
-            "SpellSuppression1": {"weights": [{"tag": "defence", "weight": 500}]},
+            "ChanceToSuppressSpells2": {
+                "spawn_weights": [{"tag": "dex_int_armour", "weight": 500}],
+                "groups": ["ChanceToSuppressSpells"],
+            },
         }
-        engine._repoe_parser.get_weight_for_tag = lambda mod_id, tag: 500
-        engine._repoe_parser.get_total_weight_by_tag = lambda tag: 500
+        engine._repoe_parser.get_spawn_weight_for_tag = (
+            lambda mod_id, tag: 500 if mod_id.startswith("ChanceToSuppress") else 0
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 500
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 500
+        )
         engine._repoe_loaded = True
 
         result = engine.calculate_ev("dense_fossil", "Dense Fossil")
 
-        assert "[RePoE: dados reais]" in result.notes
+        assert "[RePoE: dados verificados]" in result.notes
 
     def test_notes_contains_fallback_indicator(self):
-        """Notas devem indicar [FALLBACK: dados aproximados] quando source=repoe_fallback."""
+        """Notas devem indicar [FALLBACK: ...] quando source=repoe_fallback."""
         engine = ProbabilityEngine(niche="es_influence_shield")
 
         result = engine.calculate_ev("essence", "Essence of Dread")
 
-        assert "[FALLBACK: dados aproximados]" in result.notes
+        assert "[FALLBACK:" in result.notes

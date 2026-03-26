@@ -1,0 +1,382 @@
+{
+  "hollow fossil": {
+    "name": "Hollow Fossil",
+    "positive_mod_weights": [],
+    "negative_mod_weights": [],
+    "allowed_tags": [
+      "weapon",
+      "helmet",
+      "boots",
+      "gloves",
+      "body_armour"
+    ],
+    "forbidden_tags": []
+  },
+  "serrated fossil": {
+    "name": "Serrated Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "attack",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "caster",
+        "weight": 15
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "corroded fossil": {
+    "name": "Corroded Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "bleed",
+        "weight": 1000
+      },
+      {
+        "tag": "poison",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "elemental",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "aetheric fossil": {
+    "name": "Aetheric Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "caster",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "attack",
+        "weight": 15
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "aberrant fossil": {
+    "name": "Aberrant Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "chaos",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "lightning",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "frigid fossil": {
+    "name": "Frigid Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "cold",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "fire",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "glyphic fossil": {
+    "name": "Glyphic Fossil",
+    "positive_mod_weights": [],
+    "negative_mod_weights": [],
+    "allowed_tags": [
+      "weapon",
+      "body_armour",
+      "gloves",
+      "boots",
+      "helmet",
+      "shield",
+      "amulet",
+      "belt",
+      "ring",
+      "quiver"
+    ],
+    "forbidden_tags": []
+  },
+  "dense fossil": {
+    "name": "Dense Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "defences",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "life",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "prismatic fossil": {
+    "name": "Prismatic Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "elemental",
+        "weight": 600
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "bleed",
+        "weight": 0
+      },
+      {
+        "tag": "poison",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "deft fossil": {
+    "name": "Deft Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "critical",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "attribute",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "scorched fossil": {
+    "name": "Scorched Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "fire",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "cold",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "faceted fossil": {
+    "name": "Faceted Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "gem",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "pristine fossil": {
+    "name": "Pristine Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "life",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "defences",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "metallic fossil": {
+    "name": "Metallic Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "lightning",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "physical",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "sanctified fossil": {
+    "name": "Sanctified Fossil",
+    "positive_mod_weights": [],
+    "negative_mod_weights": [],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "lucent fossil": {
+    "name": "Lucent Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "mana",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "speed",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "bound fossil": {
+    "name": "Bound Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "minion",
+        "weight": 1000
+      },
+      {
+        "tag": "aura",
+        "weight": 1000
+      },
+      {
+        "tag": "curse",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "fractured fossil": {
+    "name": "Fractured Fossil",
+    "positive_mod_weights": [],
+    "negative_mod_weights": [],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "jagged fossil": {
+    "name": "Jagged Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "physical",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "chaos",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "perfect fossil": {
+    "name": "Perfect Fossil",
+    "positive_mod_weights": [],
+    "negative_mod_weights": [],
+    "allowed_tags": [
+      "weapon",
+      "body_armour",
+      "gloves",
+      "boots",
+      "helmet",
+      "shield",
+      "map"
+    ],
+    "forbidden_tags": []
+  },
+  "tangled fossil": {
+    "name": "Tangled Fossil",
+    "positive_mod_weights": [],
+    "negative_mod_weights": [],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "gilded fossil": {
+    "name": "Gilded Fossil",
+    "positive_mod_weights": [],
+    "negative_mod_weights": [],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "fundamental fossil": {
+    "name": "Fundamental Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "attribute",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "critical",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "shuddering fossil": {
+    "name": "Shuddering Fossil",
+    "positive_mod_weights": [
+      {
+        "tag": "speed",
+        "weight": 1000
+      }
+    ],
+    "negative_mod_weights": [
+      {
+        "tag": "mana",
+        "weight": 0
+      }
+    ],
+    "allowed_tags": [],
+    "forbidden_tags": []
+  },
+  "bloodstained fossil": {
+    "name": "Bloodstained Fossil",
+    "positive_mod_weights": [],
+    "negative_mod_weights": [],
+    "allowed_tags": [],
+    "forbidden_tags": [
+      "heist_contract",
+      "heist_blueprint",
+      "heist_equipment"
+    ]
+  }
+}
