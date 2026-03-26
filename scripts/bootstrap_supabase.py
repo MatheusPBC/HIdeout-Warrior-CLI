@@ -61,7 +61,7 @@ def check_bucket_exists(client, bucket_name: str) -> bool:
 def create_bucket(client, bucket_name: str, public: bool = False) -> bool:
     """Cria bucket se não existir."""
     try:
-        client.storage.create_bucket(bucket_name, {"public": public})
+        client.storage.create_bucket(bucket_name, options={"public": public})
         console.print(f"[green]Bucket '{bucket_name}' criado[/green]")
         return True
     except Exception as e:
@@ -126,7 +126,7 @@ def check_storage_connectivity(client, config: SupabaseCloudConfig) -> bool:
 def check_db_connectivity(client) -> bool:
     """Testa conectividade básica com DB."""
     try:
-        client.table("artifact_catalog").select("1").limit(1).execute()
+        client.table("artifact_catalog").select("*").limit(1).execute()
         console.print("[green]DB conectivo[/green]")
         return True
     except Exception as e:

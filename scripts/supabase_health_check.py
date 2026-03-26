@@ -53,7 +53,11 @@ def check_api_health() -> dict:
     try:
         start = datetime.now(timezone.utc)
         response = httpx.get(
-            f"{config.project_url}/health",
+            f"{config.project_url}/rest/v1/{config.artifact_catalog_table}?select=artifact_key&limit=1",
+            headers={
+                "apikey": str(config.service_role_key),
+                "Authorization": f"Bearer {config.service_role_key}",
+            },
             timeout=10.0,
         )
         latency = (datetime.now(timezone.utc) - start).total_seconds() * 1000
@@ -77,7 +81,7 @@ def check_db_health() -> dict:
 
         # Query simples para verificar DB
         response = (
-            client.table(config.artifact_catalog_table).select("1").limit(1).execute()
+            client.table(config.artifact_catalog_table).select("*").limit(1).execute()
         )
         latency = (datetime.now(timezone.utc) - start).total_seconds() * 1000
         result["latency_ms"] = round(latency, 1)
