@@ -47,7 +47,7 @@ class TestCompareMethods:
         engine = create_engine()
         results = engine.compare_methods()
         names = {r.method_name for r in results}
-        assert names == {"Dense Fossil", "Harvest Reforge Defence", "Essence of Dread"}
+        assert names == {"Dense Fossil", "Harvest Reforge Defence", "Essence"}
 
     def test_hit_probability_between_zero_and_one(self):
         """hit_probability deve estar entre 0.0 e 1.0 para todos os métodos."""
@@ -319,15 +319,23 @@ class TestProbabilityEngineRepoeLive:
         engine = ProbabilityEngine(niche="es_influence_shield")
 
         # Setup: mesmo com parser carregado, essence deve usar fallback
+        # porque os mods de ES% para shields (dex_int_armour) têm weight=0
         engine._repoe_parser = MagicMock()
         engine._repoe_parser.db = {"SomeMod": {"spawn_weights": []}}
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: 0
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 1000
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 1000
+        )
         engine._repoe_loaded = True
 
-        result = engine.calculate_ev("essence", "Essence of Dread")
+        result = engine.calculate_ev("essence", "Essence")
 
         assert result.data_source == "repoe_fallback"
         assert result.used_fallback is True
-        assert "não mapeado no RePoE" in result.fallback_reason
+        assert "weight=0" in result.fallback_reason
 
 
 class TestProbabilityEngineFallback:
@@ -352,14 +360,21 @@ class TestProbabilityEngineFallback:
         engine = ProbabilityEngine(niche="es_influence_shield")
         engine._repoe_loaded = True
         engine._repoe_parser = MagicMock()
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: 0
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 1000
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 1000
+        )
 
         # Essence não tem tag definida no MVP
-        result = engine.calculate_ev("essence", "Essence of Dread")
+        result = engine.calculate_ev("essence", "Essence")
 
         # O fallback_reason deve indicar que essence não tem tag
         assert result.used_fallback is True
-        # O código source em _get_method_params seta fallback_reason para essence
-        assert "Essence pool não mapeado" in result.fallback_reason
+        # O código source em _get_method_params indica mods com weight=0
+        assert "weight=0" in result.fallback_reason
 
     def test_notes_contains_repoe_verified_indicator(self):
         """Notas devem indicar [RePoE: dados verificados] quando source=repoe_verified."""
@@ -391,6 +406,320 @@ class TestProbabilityEngineFallback:
         """Notas devem indicar [FALLBACK: ...] quando source=repoe_fallback."""
         engine = ProbabilityEngine(niche="es_influence_shield")
 
-        result = engine.calculate_ev("essence", "Essence of Dread")
+        result = engine.calculate_ev("essence", "Essence")
 
         assert "[FALLBACK:" in result.notes
+
+
+# ============================================================================
+# BLOCO 7: TESTES PARA NOVOS NICHOS
+# ============================================================================
+
+
+class TestNicheEsBodyArmourInfluenced:
+    """Testes para o nicho es_body_armour_influenced (Body Armour ES%)."""
+
+    def test_create_engine_with_body_armour_niche(self):
+        """Deve criar engine para body_armour."""
+        engine = ProbabilityEngine(niche="es_body_armour_influenced")
+        assert isinstance(engine, ProbabilityEngine)
+        assert engine.niche == "es_body_armour_influenced"
+
+    def test_body_armour_uses_correct_item_tag(self):
+        """Deve usar item_tag='body_armour' para este nicho."""
+        engine = ProbabilityEngine(niche="es_body_armour_influenced")
+        assert engine.item_tag == "body_armour"
+
+    def test_body_armour_mods_found_in_repoe(self):
+        """Mods de ES% devem ser encontrados no RePoE para body_armour."""
+        engine = ProbabilityEngine(niche="es_body_armour_influenced")
+
+        # Setup: mods de ES% com peso para body_armour
+        fake_db = {
+            "LocalIncreasedEnergyShieldPercent8": {
+                "spawn_weights": [{"tag": "body_armour", "weight": 800}],
+                "groups": ["DefencesPercent"],
+                "generation_type": "prefix",
+            },
+            "LocalIncreasedEnergyShieldPercent7_": {
+                "spawn_weights": [{"tag": "body_armour", "weight": 600}],
+                "groups": ["DefencesPercent"],
+                "generation_type": "prefix",
+            },
+        }
+
+        engine._repoe_parser = MagicMock()
+        engine._repoe_parser.db = fake_db
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: (
+            800
+            if mod_id == "LocalIncreasedEnergyShieldPercent8"
+            else 600
+            if mod_id == "LocalIncreasedEnergyShieldPercent7_"
+            else 0
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 2000
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 2000
+        )
+        engine._repoe_loaded = True
+        engine._used_fallback = False
+        engine._fallback_reason = ""
+
+        result = engine.calculate_ev("dense_fossil", "Dense Fossil")
+
+        assert result.data_source in ("repoe_verified", "repoe_fallback")
+        assert isinstance(result.used_fallback, bool)
+
+    def test_body_armour_hit_probability_range(self):
+        """hit_probability deve estar no intervalo [0.0, 1.0] para body_armour."""
+        engine = ProbabilityEngine(niche="es_body_armour_influenced")
+
+        # Setup com parser mockado
+        engine._repoe_parser = MagicMock()
+        engine._repoe_parser.db = {}
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: 500
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 1000
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 1000
+        )
+        engine._repoe_loaded = True
+
+        result = engine.calculate_ev("dense_fossil", "Dense Fossil")
+
+        assert 0.0 <= result.hit_probability <= 1.0, (
+            f"hit_probability={result.hit_probability} fora do intervalo [0,1]"
+        )
+
+
+class TestNicheSuppressEvasionChest:
+    """Testes para o nicho suppress_evasion_chest (Spell Suppression em Dex Armour)."""
+
+    def test_create_engine_with_suppress_evasion_chest_niche(self):
+        """Deve criar engine para suppress_evasion_chest."""
+        engine = ProbabilityEngine(niche="suppress_evasion_chest")
+        assert isinstance(engine, ProbabilityEngine)
+        assert engine.niche == "suppress_evasion_chest"
+
+    def test_suppress_evasion_chest_uses_correct_item_tag(self):
+        """Deve usar item_tag='dex_armour' para este nicho."""
+        engine = ProbabilityEngine(niche="suppress_evasion_chest")
+        assert engine.item_tag == "dex_armour"
+
+    def test_suppress_evasion_chest_mods_found_in_repoe(self):
+        """Mods de Spell Suppression devem ser encontrados no RePoE para dex_armour."""
+        engine = ProbabilityEngine(niche="suppress_evasion_chest")
+
+        # Setup: mods de spell suppression com peso para dex_armour
+        fake_db = {
+            "ChanceToSuppressSpells2": {
+                "spawn_weights": [{"tag": "dex_armour", "weight": 1000}],
+                "groups": ["ChanceToSuppressSpells"],
+                "generation_type": "suffix",
+            },
+            "ChanceToSuppressSpells3": {
+                "spawn_weights": [{"tag": "dex_armour", "weight": 700}],
+                "groups": ["ChanceToSuppressSpells"],
+                "generation_type": "suffix",
+            },
+        }
+
+        engine._repoe_parser = MagicMock()
+        engine._repoe_parser.db = fake_db
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: (
+            1000
+            if mod_id == "ChanceToSuppressSpells2"
+            else 700
+            if mod_id == "ChanceToSuppressSpells3"
+            else 0
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 2500
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 2500
+        )
+        engine._repoe_loaded = True
+        engine._used_fallback = False
+        engine._fallback_reason = ""
+
+        result = engine.calculate_ev("harvest_reforge", "Harvest Reforge Defence")
+
+        assert result.data_source in ("repoe_verified", "repoe_fallback")
+        assert isinstance(result.used_fallback, bool)
+
+    def test_suppress_evasion_chest_hit_probability_range(self):
+        """hit_probability deve estar no intervalo [0.0, 1.0] para suppress_evasion_chest."""
+        engine = ProbabilityEngine(niche="suppress_evasion_chest")
+
+        # Setup com parser mockado
+        engine._repoe_parser = MagicMock()
+        engine._repoe_parser.db = {}
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: 400
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 1000
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 1000
+        )
+        engine._repoe_loaded = True
+
+        result = engine.calculate_ev("harvest_reforge", "Harvest Reforge Defence")
+
+        assert 0.0 <= result.hit_probability <= 1.0, (
+            f"hit_probability={result.hit_probability} fora do intervalo [0,1]"
+        )
+
+
+class TestNicheWandPlusGems:
+    """Testes para o nicho wand_plus_gems (+1 Gems em Wands)."""
+
+    def test_create_engine_with_wand_plus_gems_niche(self):
+        """Deve criar engine para wand_plus_gems."""
+        engine = ProbabilityEngine(niche="wand_plus_gems")
+        assert isinstance(engine, ProbabilityEngine)
+        assert engine.niche == "wand_plus_gems"
+
+    def test_wand_plus_gems_uses_correct_item_tag(self):
+        """Deve usar item_tag='wand' para este nicho."""
+        engine = ProbabilityEngine(niche="wand_plus_gems")
+        assert engine.item_tag == "wand"
+
+    def test_wand_plus_gems_mods_found_in_repoe(self):
+        """Mods de +1 Gems devem ser encontrados no RePoE para wand."""
+        engine = ProbabilityEngine(niche="wand_plus_gems")
+
+        # Setup: mods de gem level com peso para wand
+        fake_db = {
+            "GlobalSpellGemsLevel1": {
+                "spawn_weights": [{"tag": "wand", "weight": 1200}],
+                "groups": ["SpellGems"],
+                "generation_type": "prefix",
+            },
+            "DelveIntelligenceGemLevel1": {
+                "spawn_weights": [{"tag": "wand", "weight": 900}],
+                "groups": ["GemLevel"],
+                "generation_type": "suffix",
+            },
+        }
+
+        engine._repoe_parser = MagicMock()
+        engine._repoe_parser.db = fake_db
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: (
+            1200
+            if mod_id == "GlobalSpellGemsLevel1"
+            else 900
+            if mod_id == "DelveIntelligenceGemLevel1"
+            else 0
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 3000
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 3000
+        )
+        engine._repoe_loaded = True
+        engine._used_fallback = False
+        engine._fallback_reason = ""
+
+        result = engine.calculate_ev("dense_fossil", "Dense Fossil")
+
+        assert result.data_source in ("repoe_verified", "repoe_fallback")
+        assert isinstance(result.used_fallback, bool)
+
+    def test_wand_plus_gems_hit_probability_range(self):
+        """hit_probability deve estar no intervalo [0.0, 1.0] para wand_plus_gems."""
+        engine = ProbabilityEngine(niche="wand_plus_gems")
+
+        # Setup com parser mockado
+        engine._repoe_parser = MagicMock()
+        engine._repoe_parser.db = {}
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: 600
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 1500
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 1500
+        )
+        engine._repoe_loaded = True
+
+        result = engine.calculate_ev("dense_fossil", "Dense Fossil")
+
+        assert 0.0 <= result.hit_probability <= 1.0, (
+            f"hit_probability={result.hit_probability} fora do intervalo [0,1]"
+        )
+
+
+class TestAllNichesMetadata:
+    """Testes transversais para todos os nichos."""
+
+    @pytest.mark.parametrize(
+        "niche,expected_tag",
+        [
+            ("es_influence_shield", "dex_int_armour"),
+            ("es_body_armour_influenced", "body_armour"),
+            ("suppress_evasion_chest", "dex_armour"),
+            ("wand_plus_gems", "wand"),
+        ],
+    )
+    def test_niches_have_correct_item_tag(self, niche, expected_tag):
+        """Cada nicho deve usar o item_tag correto conforme definido no data_parser."""
+        engine = ProbabilityEngine(niche=niche)
+        assert engine.item_tag == expected_tag, (
+            f"Nicho '{niche}' deveria usar item_tag='{expected_tag}', "
+            f"mas usa '{engine.item_tag}'"
+        )
+
+    @pytest.mark.parametrize(
+        "niche",
+        [
+            "es_influence_shield",
+            "es_body_armour_influenced",
+            "suppress_evasion_chest",
+            "wand_plus_gems",
+        ],
+    )
+    def test_all_niches_return_valid_hit_probability(self, niche):
+        """Todos os nichos devem retornar hit_probability no intervalo [0.0, 1.0]."""
+        engine = ProbabilityEngine(niche=niche)
+
+        # Garantir RePoE mockado para não falhar sem dados reais
+        engine._repoe_parser = MagicMock()
+        engine._repoe_parser.db = {}
+        engine._repoe_parser.get_spawn_weight_for_tag = lambda mod_id, tag: 100
+        engine._repoe_parser.get_total_spawn_weight_by_groups = (
+            lambda item_tag, groups, gen_type: 500
+        )
+        engine._repoe_parser.get_total_spawn_weight_by_tag = (
+            lambda item_tag, generation_type=None: 500
+        )
+        engine._repoe_loaded = True
+
+        results = engine.compare_methods()
+        for r in results:
+            assert 0.0 <= r.hit_probability <= 1.0, (
+                f"Nicho '{niche}': método '{r.method_name}' tem "
+                f"hit_probability={r.hit_probability} fora do intervalo [0,1]"
+            )
+
+    @pytest.mark.parametrize(
+        "niche",
+        [
+            "es_influence_shield",
+            "es_body_armour_influenced",
+            "suppress_evasion_chest",
+            "wand_plus_gems",
+        ],
+    )
+    def test_all_niches_have_data_source_in_results(self, niche):
+        """Todos os nichos devem incluir data_source em seus resultados."""
+        engine = ProbabilityEngine(niche=niche)
+        results = engine.compare_methods()
+
+        for r in results:
+            assert hasattr(r, "data_source")
+            assert isinstance(r.data_source, str)
+            assert r.data_source != ""

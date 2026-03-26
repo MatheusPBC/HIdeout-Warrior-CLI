@@ -349,3 +349,73 @@ Reduzir fallback, melhorar mapeamento de mod IDs do RePoE e refinar o cálculo p
 ---
 
 *Plano atualizado - Bloco 6 completo: 2026-03-26*
+
+---
+
+## Bloco 7: Expandir Nichos de Crafting
+
+### Objetivo
+
+Expandir o `craft-plan` para suportar múltiplos nichos além de `es_influence_shield`, com a mesma qualidade de dados RePoE.
+
+### Nichos Implementados
+
+| Nicho | Item Tag | Mod IDs Alvo | Pool |
+|-------|----------|--------------|------|
+| `es_influence_shield` | `dex_int_armour` | Spell Suppression suffix | 57175 suffix |
+| `es_body_armour_influenced` | `body_armour` | ES% prefix | 60000 prefix |
+| `suppress_evasion_chest` | `dex_armour` | Spell Suppression suffix | 35000 suffix |
+| `wand_plus_gems` | `wand` | +1 Spell Gems prefix, +1 Int Gems suffix | 114975 prefix |
+
+### O que foi feito
+
+1. **Refatoração do `probability_engine.py`:**
+   - Criada estrutura `NICHE_CONFIGS` para configuração modular
+   - Cada nicho define: `item_tag`, `target_mods`, `pool_groups`, `base_cost`
+   - Fallbacks específicos por nicho
+
+2. **Atualização do `data_parser.py`:**
+   - Adicionadas constantes para os novos mods:
+     - `es_percent_body` para ES% em body_armour
+     - `spell_suppression_dex` para Spell Suppression em dex_armour
+     - `spell_skill_gem_level` e `intelligence_gem_level` para wands
+   - Adicionado cache `ITEM_TAG_POOL_SIZES`
+
+3. **Testes:**
+   - 50 testes passando
+   - Novos testes para cada nicho
+   - Testes parametrizados para validação de todos os nichos
+
+### Arquitetura
+
+```python
+NICHE_CONFIGS = {
+    "es_influence_shield": {...},
+    "es_body_armour_influenced": {...},
+    "suppress_evasion_chest": {...},
+    "wand_plus_gems": {...},
+}
+
+engine = create_engine(niche="suppress_evasion_chest")
+results = engine.compare_methods()
+```
+
+### Verificação
+
+```bash
+python -c "from core.probability_engine import NICHE_CONFIGS; print(list(NICHE_CONFIGS.keys()))"
+# ['es_influence_shield', 'es_body_armour_influenced', 'suppress_evasion_chest', 'wand_plus_gems']
+
+pytest tests/test_probability_engine.py -v
+# 50 passed
+```
+
+### Status
+
+| Bloco | Prioridade | Dependência | Status |
+|-------|------------|-------------|--------|
+| **7. Expandir Nichos** | **P1** | **6** | ✅ **Completo** |
+
+---
+
+*Plano atualizado - Bloco 7 completo: 2026-03-26*

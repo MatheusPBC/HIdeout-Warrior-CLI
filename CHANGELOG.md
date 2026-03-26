@@ -2,25 +2,23 @@
 
 ## 2026-03-26
 
-- **Bloco 6 completo** - Nicho `es_influence_shield` endurtecido com RePoE real.
-- **Mod IDs mapeados corretamente** no `core/data_parser.py`:
-  - Spell Suppression: `ChanceToSuppressSpells2/3/4` (suffix)
-  - ES% Prefix: `LocalIncreasedEnergyShieldPercent8` (e tiers)
-- **Spawn weights validados**:
-  - Tag `dex_int_armour` para ES Shield (peso 500)
-  - Dense Fossil usa tag `defences` (com 's')
-  - Novos métodos: `get_spawn_weight_for_tag`, `get_total_spawn_weight_by_groups`
-- **Hit probability calculada com dados RePoE reais**:
-  - Dense Fossil: ~30% (1500/5000 do pool `ChanceToSuppressSpells`)
-  - Harvest Reforge: ~30% (mesmo pool)
-  - Essence: mantido fallback (pool não mapeado no RePoE)
-- **`data_source` melhorado**:
-  - `repoe_verified`: mods encontrados com peso > 0
-  - `repoe_fallback`: graceful degradation com logs explícitos
-- **Parser atualizado**:
-  - Corrigido de `generation_weights` para `spawn_weights`
-  - Adicionada extração de `generation_type`, `groups`, `stats`
-- **Testes**: 275 passed, nenhuma regressão.
+### Bloco 7: Nichos Expandidos
+
+- **Refatoração completa do `probability_engine.py`** para suportar múltiplos nichos.
+- **Novos nichos suportados:**
+  - `es_body_armour_influenced`: Body Armour ES% (item_tag: `body_armour`)
+  - `suppress_evasion_chest`: Spell Suppression em DexArmour (item_tag: `dex_armour`)
+  - `wand_plus_gems`: +1 Gem Level em Wands (item_tag: `wand`)
+- **Estrutura `NICHE_CONFIGS`**: Configuração modular por nicho com `item_tag`, `target_mods`, `pool_groups`.
+- **Cache `ITEM_TAG_POOL_SIZES`**: Pool sizes pré-calculados por item_tag.
+- **Testes expandidos**: 50 testes passando, incluindo testes parametrizados para todos os nichos.
+- **API**: `create_engine(niche="...")` agora aceita qualquer nicho suportado.
+
+### Bloco 6: Nicho Endurecido (anterior)
+
+- Mod IDs mapeados corretamente no RePoE
+- Spawn weights validados
+- `data_source: repoe_verified` para mods encontrados
 
 ## 2026-03-25
 

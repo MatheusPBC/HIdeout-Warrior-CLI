@@ -323,6 +323,9 @@ class RePoeParser:
 
 # Constantes para mods conhecidos do nicho es_influence_shield
 REPOE_MOD_IDS = {
+    # ============================================================
+    # NICHO: es_influence_shield
+    # ============================================================
     # Spell Suppression Suffix (ChanceToSuppressSpells)
     "spell_suppression": {
         "mod_ids": [
@@ -351,6 +354,65 @@ REPOE_MOD_IDS = {
         "generation_type": "prefix",
         "groups": ["DefencesPercent"],
     },
+    # ============================================================
+    # NICHO: es_body_armour_influenced
+    # ============================================================
+    # ES % Prefix para Body Armour
+    "es_percent_body": {
+        "mod_ids": [
+            "LocalIncreasedEnergyShieldPercent8",  # Unfaltering (T1) - também spawn em body_armour
+            "LocalIncreasedEnergyShieldPercent7_",  # Unassailable (T2)
+            "LocalIncreasedEnergyShieldPercent6",  # Indomitable (T3)
+            "LocalIncreasedEnergyShieldPercent5",  # Dauntless (T4)
+        ],
+        "item_tags": ["body_armour"],
+        "generation_type": "prefix",
+        "groups": ["DefencesPercent"],
+    },
+    # ============================================================
+    # NICHO: suppress_evasion_chest
+    # ============================================================
+    # Spell Suppression para Dex/DexInt base (Eva)
+    "spell_suppression_dex": {
+        "mod_ids": [
+            "ChanceToSuppressSpells2",  # of Snuffing (T2)
+            "ChanceToSuppressSpells3",  # of Revoking (T3)
+            "ChanceToSuppressSpells4",  # of Abjuration (T4)
+        ],
+        "item_tags": ["dex_armour"],  # Peso máximo 1000 em dex_armour puro
+        "generation_type": "suffix",
+        "groups": ["ChanceToSuppressSpells"],
+    },
+    # ============================================================
+    # NICHO: wand_plus_gems
+    # ============================================================
+    # +1 All Spell Skill Gems (prefix)
+    "spell_skill_gem_level": {
+        "mod_ids": [
+            "GlobalSpellGemsLevel1",  # Magister's - +1 level to all Spell Skill Gems
+        ],
+        "item_tags": ["wand"],
+        "generation_type": "prefix",
+        "groups": ["SpellGems"],  # grupo aproximado
+    },
+    # +1 Intelligence Skill Gems (suffix, Delve)
+    "intelligence_gem_level": {
+        "mod_ids": [
+            "DelveIntelligenceGemLevel1",  # of the Underground - +1 to Level of Socketed Intelligence Gems
+        ],
+        "item_tags": ["wand"],
+        "generation_type": "suffix",
+        "groups": ["GemLevel"],  # grupo aproximado
+    },
+}
+
+# Pool sizes por item_tag (cacheado para performance)
+ITEM_TAG_POOL_SIZES = {
+    "shield": {"prefix": 37000, "suffix": 57175},
+    "body_armour": {"prefix": 60000, "suffix": 23600},
+    "dex_int_armour": {"prefix": 25000, "suffix": 42750},
+    "dex_armour": {"prefix": 20000, "suffix": 35000},
+    "wand": {"prefix": 114975, "suffix": 74045},
 }
 
 DENSE_FOSSIL_POSITIVE_TAG = "defences"  # Dense Fossil aumenta peso de mods de defesa
