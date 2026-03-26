@@ -170,3 +170,67 @@ O MVP será considerado pronto quando:
 ---
 
 *Plano atualizado para MVP do `craft-plan`: 2026-03-26*
+
+---
+
+## Bloco 5: RePoE Real no `probability_engine.py` para `es_influence_shield`
+
+### Objetivo
+
+Substituir o fallback hardcoded (valores fixos em `_DENSE_FOSSIL_PARAMS`, `_HARVEST_REFORGE_DEFENCE_PARAMS`, `_ESSENCE_DREAD_PARAMS`) por consulta real ao RePoE via `RePoeParser.get_weight()` e `get_total_weight_by_tag()`.
+
+### O que sai do fallback e passa a usar RePoE real
+
+| Método | Tag consultada no RePoE | Mod target |
+|--------|------------------------|------------|
+| Dense Fossil | `defence` | `Spell Suppression` suffix |
+| Harvest Reforge Defence | `defence` | `Spell Suppression` suffix |
+| Essence of Dread | `essence` + filtro `ES prefix` | `Maximum Energy Shield` prefix |
+
+**Cálculo de `hit_probability`**:
+```
+P(hit) = weight(target_mod) / total_weight_by_tag(tag)
+```
+
+**Cálculo de `hit_probability` para Essence** (caso especial — pool restrito):
+```
+P(hit) = weight(target_mod) / total_essence_mods_for(base_type)
+```
+
+### O que continua fora do escopo
+
+- Outros nichos além de `es_influence_shield`
+- Dense Fossil + Harvest com-tags (ainda não mapeado)
+- Lógica de brick risk por mod (permanece fallback conservativo)
+- Cache persistente de pesos RePoE (usa o que já está em `data/`)
+
+### Arquivos prováveis
+
+- `core/probability_engine.py` (substitui lógica do `_get_method_params()`)
+- `core/data_parser.py` (pode precisar de ajuste em `get_total_weight_by_tag` para filtrar por `mod_group` ou `base_type`)
+
+### Verificação mínima
+
+1. `craft-plan` para `es_influence_shield` retorna `data_source: "repoe_live"` para todos os 3 métodos (sem fallback)
+2. `hit_probability` varia entre 0.0 e 1.0
+3. `data_source` ainda indica `"repoe_fallback"` quando o mod não existe no RePoE (graceful degradation)
+
+### Risco principal
+
+**Mod ID incorreto**: se os `mod_id` do RePoE não baterem com os nomes dos mods do jogo para `es_influence_shield`, o peso retorna 0 e o fallback é acionado silenciosamente. Mitigação: log explícito quando peso = 0.
+
+---
+
+## Ordem de Execução (Atualizada)
+
+| Bloco | Prioridade | Dependência |
+|-------|------------|-------------|
+| 1. CLI `craft-plan` | P0 | — |
+| 2. `probability_engine.py` MVP | P0 | — |
+| 3. Perfil `es_influence_shield` | P1 | 1 + 2 |
+| 4. Integração e Verificação | P1 | 1 + 2 + 3 |
+| **5. RePoE Real** | **P0** | **3** |
+
+---
+
+*Plano atualizado com Bloco 5 (RePoE real): 2026-03-26*
