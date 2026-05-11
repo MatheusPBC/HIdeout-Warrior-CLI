@@ -175,7 +175,60 @@ def test_collect_trade_bucket_applies_conservative_request_delays() -> None:
     assert sleep_calls == [3.0, 1.0, 3.0, 1.0]
 
 
-def test_get_dynamic_base_types_prioritizes_firehose_activity() -> None:
+def test_get_dynamic_base_types_prioritizes_trade_bucket_activity() -> None:
+    conn = sqlite3.connect(":memory:")
+    initialize_trade_bucket_database(conn)
+    rows = []
+    for item_id, base_type in [
+        ("ring-1", "Opal Ring"),
+        ("ring-2", "Opal Ring"),
+        ("wand-1", "Imbued Wand"),
+        ("standard-1", "Vaal Regalia"),
+    ]:
+        row = _sample_row()
+        row["league"] = "Mirage" if item_id != "standard-1" else "Standard"
+        row["item_id"] = item_id
+        row["base_type"] = base_type
+        rows.append(row)
+    ingest_trade_bucket_rows(conn, rows)
+
+    bases = get_dynamic_base_types(conn, league="Mirage", limit=2)
+
+    assert bases == ["Opal Ring", "Imbued Wand"]
+
+
+def test_get_dynamic_base_types_prioritizes_discovered_base_types() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE discovered_base_types (
+            run_id TEXT,
+            league TEXT,
+            base_type TEXT,
+            sample_count INTEGER,
+            min_price_chaos REAL,
+            median_price_chaos REAL,
+            max_price_chaos REAL,
+            freshness_score REAL,
+            discovery_score REAL,
+            discovered_at TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO discovered_base_types VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("run-1", "Mirage", "Stygian Vise", 5, 10.0, 20.0, 40.0, 1.0, 2.0, "now"),
+            ("run-1", "Mirage", "Opal Ring", 3, 10.0, 20.0, 40.0, 1.0, 1.5, "now"),
+        ],
+    )
+
+    bases = get_dynamic_base_types(conn, league="Mirage", limit=2)
+
+    assert bases == ["Stygian Vise", "Opal Ring"]
+
+
+def test_get_dynamic_base_types_falls_back_to_firehose_activity() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """

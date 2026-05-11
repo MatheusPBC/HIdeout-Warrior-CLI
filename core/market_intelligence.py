@@ -12,6 +12,19 @@ BALANCED_WEIGHTS = {
     "trend_score": 0.15,
 }
 
+GOLD_MOD_FEATURES = (
+    ("has_life", "Life"),
+    ("has_resist", "Resist"),
+    ("has_attributes", "Attributes"),
+    ("has_mana", "Mana"),
+    ("has_crit", "Crit"),
+    ("has_spell_damage", "SpellDamage"),
+    ("has_cast_speed", "CastSpeed"),
+    ("has_spell_crit", "SpellCrit"),
+    ("has_suppress", "SpellSuppress"),
+    ("plus_all_spell_gems", "PlusAllSpellGems"),
+)
+
 
 @dataclass(frozen=True)
 class MarketSegment:
@@ -137,7 +150,7 @@ def _build_segment(row: dict[str, Any]) -> MarketSegment:
     base_type = _clean_value(row.get("base_type"), "unknown")
     ilvl_band = _clean_value(row.get("ilvl_band"), "unknown")
     price_band = _price_band(row.get("price_chaos"))
-    mod_signature = _token_signature(row.get("mod_tokens"))
+    mod_signature = _mod_signature(row)
     tag_signature = _token_signature(row.get("tag_tokens"))
     key = "|".join(
         [league, item_family, base_type, ilvl_band, price_band, mod_signature, tag_signature]
@@ -206,7 +219,7 @@ def _build_opportunities(group: pd.DataFrame) -> list[MarketOpportunityCandidate
             continue
         candidates.append(
             MarketOpportunityCandidate(
-                item_id=_clean_value(row.get("item_id"), "unknown"),
+                item_id=_item_id(row),
                 base_type=_clean_value(row.get("base_type"), "unknown"),
                 listed_price=round(listed_price, 2),
                 reference_price=round(reference_price, 2),
@@ -245,6 +258,31 @@ def _token_signature(value: Any) -> str:
     if not tokens:
         return "none"
     return "+".join(sorted(dict.fromkeys(tokens))[:4])
+
+
+def _mod_signature(row: dict[str, Any]) -> str:
+    signature = _token_signature(row.get("mod_tokens"))
+    if signature != "none":
+        return signature
+    feature_tokens = [
+        label for column, label in GOLD_MOD_FEATURES if _is_truthy(row.get(column))
+    ]
+    return _token_signature(feature_tokens)
+
+
+def _item_id(row: dict[str, Any]) -> str:
+    item_id = _clean_value(row.get("item_id"), "")
+    if item_id:
+        return item_id
+    return _clean_value(row.get("event_key"), "unknown")
+
+
+def _is_truthy(value: Any) -> bool:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value)
 
 
 def _coerce_tokens(value: Any) -> list[str]:
@@ -292,6 +330,8 @@ def _weighted_score(metrics: MarketSegmentMetrics) -> float:
 
 def _classify_status(metrics: MarketSegmentMetrics, score: float) -> str:
     if metrics.sample_count < 10:
+        if _is_evaluation_candidate(metrics):
+            return "evaluation_candidate"
         return "avoid"
     if metrics.safety_score < 0.45:
         return "avoid"
@@ -302,8 +342,18 @@ def _classify_status(metrics: MarketSegmentMetrics, score: float) -> str:
     return "watch"
 
 
+def _is_evaluation_candidate(metrics: MarketSegmentMetrics) -> bool:
+    return (
+        metrics.safety_score >= 0.70
+        and metrics.liquidity_score >= 0.65
+        and metrics.margin_score >= 0.60
+    )
+
+
 def _explain_score(metrics: MarketSegmentMetrics, status: str) -> str:
     reasons = []
+    if status == "evaluation_candidate":
+        reasons.append("manual evaluation")
     if metrics.sample_count < 10:
         reasons.append("low evidence")
     if metrics.safety_score < 0.45:

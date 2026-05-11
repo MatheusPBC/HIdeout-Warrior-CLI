@@ -184,6 +184,75 @@ def test_build_training_snapshot_creates_layers_partitions_and_dedupes(
     assert gold_item_partitions
 
 
+def test_build_training_snapshot_filters_target_league_and_replaces_old_output(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = tmp_path / "firehose.db"
+    out_dir = tmp_path / "training_snapshots"
+    stale_file = out_dir / "gold" / "snapshot_date=old" / "league=Standard" / "item_family=generic" / "part-old.parquet"
+    stale_file.parent.mkdir(parents=True, exist_ok=True)
+    stale_file.write_bytes(b"old")
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE stash_events (
+            change_id TEXT,
+            item_id TEXT,
+            league TEXT,
+            account_name TEXT,
+            indexed TEXT,
+            price_amount REAL,
+            price_currency TEXT,
+            price_chaos REAL,
+            raw_item_json TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO stash_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "change-1",
+                "mirage-item",
+                "Mirage",
+                "seller-a",
+                "2026-05-11T10:00:00Z",
+                10.0,
+                "chaos",
+                10.0,
+                pd.Series(_sample_item("mirage-item")).to_json(),
+            ),
+            (
+                "change-2",
+                "standard-item",
+                "Standard",
+                "seller-b",
+                "2026-05-11T10:00:00Z",
+                10.0,
+                "chaos",
+                10.0,
+                pd.Series(_sample_item("standard-item")).to_json(),
+            ),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    summary = build_training_snapshot(
+        db_path=str(db_path),
+        output_dir=str(out_dir),
+        snapshot_date="2026-05-11",
+        league="Mirage",
+    )
+
+    assert summary["league"] == "Mirage"
+    assert summary["bronze_rows"] == 1
+    assert not stale_file.exists()
+    assert (out_dir / "bronze" / "snapshot_date=2026-05-11" / "league=Mirage").exists()
+    assert not (out_dir / "bronze" / "snapshot_date=2026-05-11" / "league=Standard").exists()
+
+
 def test_snapshot_contract_reconciles_sources_and_carries_freshness(tmp_path) -> None:
     db_path = tmp_path / "firehose.db"
     conn = sqlite3.connect(db_path)

@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from core.api_integrator import MarketAPIClient
 from core.ops_metrics import append_metric_event
+from core.trade_base_discovery import get_discovered_base_types
 
 DEFAULT_BUCKETS: Tuple[Tuple[int, int], ...] = (
     (1, 15),
@@ -30,6 +31,18 @@ DEFAULT_BASE_TYPES: Tuple[str, ...] = (
     "Sadist Garb",
     "Large Cluster Jewel",
     "Opal Ring",
+    "Amethyst Ring",
+    "Two-Stone Ring",
+    "Stygian Vise",
+    "Crystal Belt",
+    "Sorcerer Gloves",
+    "Sorcerer Boots",
+    "Hubris Circlet",
+    "Void Sceptre",
+    "Prophecy Wand",
+    "Archon Kite Shield",
+    "Citrine Amulet",
+    "Turquoise Amulet",
 )
 
 DEFAULT_MAX_SEARCHES_PER_RUN = 60
@@ -310,12 +323,40 @@ def get_dynamic_base_types(
     league: str,
     limit: int = 8,
 ) -> List[str]:
-    if limit <= 0 or not _table_exists(conn, "stash_events"):
+    if limit <= 0:
+        return []
+    discovered_bases = get_discovered_base_types(conn, league=league, limit=limit)
+    if discovered_bases:
+        return discovered_bases
+    trade_bases = _get_dynamic_base_types_from_table(
+        conn,
+        table_name="trade_bucket_events",
+        league=league,
+        limit=limit,
+    )
+    if trade_bases:
+        return trade_bases
+    return _get_dynamic_base_types_from_table(
+        conn,
+        table_name="stash_events",
+        league=league,
+        limit=limit,
+    )
+
+
+def _get_dynamic_base_types_from_table(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    league: str,
+    limit: int,
+) -> List[str]:
+    if not _table_exists(conn, table_name):
         return []
     rows = conn.execute(
-        """
+        f"""
         SELECT base_type, COUNT(*) AS seen_count
-        FROM stash_events
+        FROM {table_name}
         WHERE league = ?
           AND base_type IS NOT NULL
           AND TRIM(base_type) != ''

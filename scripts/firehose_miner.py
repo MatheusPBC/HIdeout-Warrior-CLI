@@ -263,6 +263,11 @@ def update_checkpoint(
     )
     conn.commit()
     try:
+        from core.cloud_config import load_cloud_config
+
+        config = load_cloud_config()
+        if not config.is_configured:
+            return
         row = conn.execute(
             "SELECT next_change_id, pages_processed, events_ingested, duplicates_skipped FROM miner_checkpoint WHERE id = 1"
         ).fetchone()
@@ -272,6 +277,7 @@ def update_checkpoint(
                 pages_processed=int(row[1] or 0),
                 events_ingested=int(row[2] or 0),
                 duplicates_skipped=int(row[3] or 0),
+                config=config,
             )
             if not success:
                 logger.warning(
@@ -395,6 +401,7 @@ def ingest_stash_page(
     collected_at: Optional[str] = None,
     oauth_source: Optional[str] = None,
     oauth_scope: Optional[str] = None,
+    target_league: Optional[str] = None,
 ) -> Tuple[int, int]:
     inserted = 0
     duplicates = 0
@@ -410,6 +417,8 @@ def ingest_stash_page(
         for stash in stashes:
             stash_name = stash.get("stash", "")
             league = stash.get("league", "")
+            if target_league and str(league) != target_league:
+                continue
             account_name = stash.get("accountName", "")
             for item in stash.get("items", []) or []:
                 is_useful, amount, currency, price_chaos = is_useful_item(item)
@@ -524,6 +533,11 @@ def run(
         "--user-agent",
         help="Identifiable User-Agent required by PoE API policy",
     ),
+    league: Optional[str] = typer.Option(
+        None,
+        "--league",
+        help="Only persist listings from this league.",
+    ),
 ) -> None:
     run_id = str(int(time.time() * 1000))
     db_file = Path(db_path)
@@ -627,6 +641,7 @@ def run(
                 oauth_scope=(
                     resolved_oauth.scope if resolved_oauth else effective_oauth_scope
                 ),
+                target_league=league,
             )
 
             # checkpoint apenas depois do lote persistido com sucesso.
@@ -672,6 +687,7 @@ def run(
                 "throughput_items_per_sec": round(throughput, 4),
                 "db_path": db_path,
                 "max_pages": max_pages,
+                "league": league,
             },
         )
     except Exception:

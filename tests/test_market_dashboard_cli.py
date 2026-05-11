@@ -120,6 +120,61 @@ def test_market_dashboard_table_shows_evaluation_opportunity(tmp_path) -> None:
     assert "evaluation" in result.output
 
 
+def test_market_dashboard_lists_evaluation_candidates_outside_top_segments(tmp_path) -> None:
+    snapshot = tmp_path / "market_intelligence.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-11T00:00:00Z",
+                "risk_profile": "balanced",
+                "top_segments": [
+                    {
+                        "segment": {
+                            "item_family": "generic",
+                            "base_type": "Slow Base",
+                            "price_band": "1-15",
+                        },
+                        "metrics": {},
+                        "score": {"status": "watch", "market_score": 0.1, "explanation": "watch"},
+                        "opportunities": [],
+                    }
+                ],
+                "segments": [
+                    {
+                        "segment": {
+                            "item_family": "jewel",
+                            "base_type": "Crimson Jewel",
+                            "price_band": "151-500",
+                        },
+                        "metrics": {},
+                        "score": {
+                            "status": "evaluation_candidate",
+                            "market_score": 0.54,
+                            "explanation": "manual evaluation",
+                        },
+                        "opportunities": [
+                            {
+                                "mode": "evaluation",
+                                "item_id": "candidate-1",
+                                "listed_price": 200.0,
+                                "reference_price": 300.0,
+                                "estimated_upside": 0.5,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["market-dashboard", "--snapshot", str(snapshot), "--top", "1"])
+
+    assert result.exit_code == 0
+    assert "candidate-1" in result.output
+    assert "Crimson Jewel" in result.output
+
+
 def test_market_dashboard_fails_clearly_when_snapshot_is_missing(tmp_path) -> None:
     missing_snapshot = tmp_path / "missing.json"
 

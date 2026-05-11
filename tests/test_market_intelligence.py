@@ -52,6 +52,27 @@ def test_low_sample_segment_is_not_promoted() -> None:
     assert "low evidence" in result.explanation.lower()
 
 
+def test_low_sample_with_large_margin_is_evaluation_candidate() -> None:
+    metrics = MarketSegmentMetrics(
+        sample_count=4,
+        fresh_ratio=1.0,
+        stale_ratio=0.0,
+        price_floor=80.0,
+        price_median=140.0,
+        price_spread=0.4286,
+        volume_score=0.08,
+        liquidity_score=0.68,
+        safety_score=0.75,
+        margin_score=0.75,
+        trend_score=0.08,
+    )
+
+    result = score_market_segment(metrics)
+
+    assert result.status == "evaluation_candidate"
+    assert "manual evaluation" in result.explanation.lower()
+
+
 def test_emerging_segment_can_have_moderate_evidence_and_high_trend() -> None:
     metrics = MarketSegmentMetrics(
         sample_count=24,
@@ -202,3 +223,40 @@ def test_build_market_segments_includes_evaluation_opportunities() -> None:
     assert segment.opportunities[0].listed_price == 80.0
     assert segment.opportunities[0].reference_price == 110.0
     assert segment.opportunities[0].estimated_upside == 0.375
+
+
+def test_market_segments_support_gold_schema_without_item_tokens() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "event_key": "gold-event-1",
+                "league": "Standard",
+                "item_family": "accessory_generic",
+                "base_type": "Diamond Ring",
+                "ilvl_band": "high",
+                "price_chaos": 20.0,
+                "has_life": 1.0,
+                "has_resist": 1.0,
+                "has_attributes": 0.0,
+                "freshness_band": "fresh",
+            },
+            {
+                "event_key": "gold-event-2",
+                "league": "Standard",
+                "item_family": "accessory_generic",
+                "base_type": "Diamond Ring",
+                "ilvl_band": "high",
+                "price_chaos": 40.0,
+                "has_life": 1.0,
+                "has_resist": 1.0,
+                "has_attributes": 0.0,
+                "freshness_band": "active",
+            },
+        ]
+    )
+
+    segment = build_market_segments(frame)[0]
+
+    assert "Life" in segment.segment.mod_signature
+    assert "Resist" in segment.segment.mod_signature
+    assert segment.opportunities[0].item_id == "gold-event-1"

@@ -2,6 +2,7 @@ import os
 import sys
 import hashlib
 import json
+import shutil
 import sqlite3
 import time as time_module
 from datetime import datetime, timezone
@@ -346,7 +347,7 @@ def _write_partitioned_parquet(
 
 
 def build_bronze_dataframe(
-    db_path: str, snapshot_date: str
+    db_path: str, snapshot_date: str, league: Optional[str] = None
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -438,6 +439,8 @@ def build_bronze_dataframe(
         stats["rows_read"] = len(rows)
         for row in rows:
             row_map = dict(row)
+            if league and str(row_map.get("league") or "") != league:
+                continue
             parsed_item = _safe_json_load(row_map.get("raw_item_json"))
             if parsed_item is None:
                 stats["invalid_json_skipped"] += 1
@@ -647,7 +650,10 @@ def build_gold_dataframe(silver_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_training_snapshot(
-    db_path: str, output_dir: str, snapshot_date: Optional[str] = None
+    db_path: str,
+    output_dir: str,
+    snapshot_date: Optional[str] = None,
+    league: Optional[str] = None,
 ) -> Dict[str, Any]:
     effective_snapshot_date = (
         snapshot_date or datetime.now(timezone.utc).date().isoformat()
@@ -655,7 +661,12 @@ def build_training_snapshot(
     target_root = Path(output_dir)
 
     print(f"[cyan]Iniciando snapshot[/cyan] sqlite={db_path} output={output_dir}")
-    bronze_df, bronze_stats = build_bronze_dataframe(db_path, effective_snapshot_date)
+    for layer_name in ("bronze", "silver", "gold"):
+        shutil.rmtree(target_root / layer_name, ignore_errors=True)
+
+    bronze_df, bronze_stats = build_bronze_dataframe(
+        db_path, effective_snapshot_date, league=league
+    )
     print(
         "[blue]Bronze[/blue] "
         f"rows_read={bronze_stats['rows_read']} "
@@ -699,6 +710,7 @@ def build_training_snapshot(
 
     summary = {
         "snapshot_date": effective_snapshot_date,
+        "league": league,
         "bronze": {
             "rows": int(len(bronze_df)),
             "rows_read": bronze_stats["rows_read"],
@@ -774,11 +786,15 @@ def build(
     snapshot_date: Optional[str] = typer.Option(
         None, "--snapshot-date", help="Override snapshot date (YYYY-MM-DD)"
     ),
+    league: Optional[str] = typer.Option(
+        None, "--league", help="Only include one league in the snapshot"
+    ),
 ) -> None:
     build_training_snapshot(
         db_path=db_path,
         output_dir=output_dir,
         snapshot_date=snapshot_date,
+        league=league,
     )
 
 

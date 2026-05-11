@@ -41,16 +41,20 @@ def build_market_intelligence(
         "--risk-profile",
         help="Risk profile used for scoring.",
     ),
+    league: str | None = typer.Option(None, "--league", help="Only include one league."),
     top: int = typer.Option(20, "--top", help="Number of top segments to include."),
 ) -> None:
     if not gold_path.exists():
         raise typer.BadParameter(f"Gold snapshot not found: {gold_path}")
 
     frame = pd.read_parquet(gold_path)
+    if league:
+        frame = frame[frame["league"].astype(str) == league]
     segments = build_market_segments(frame)
     payload = {
         "generated_at": _utc_now_iso(),
         "risk_profile": risk_profile,
+        "league": league,
         "source": str(gold_path),
         "segments": [segment.to_dict() for segment in segments],
         "top_segments": [segment.to_dict() for segment in segments[:top]],

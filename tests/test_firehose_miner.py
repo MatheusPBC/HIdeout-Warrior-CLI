@@ -77,6 +77,56 @@ def test_ingest_is_idempotent_by_change_and_item_id() -> None:
     assert rows == 1
 
 
+def test_ingest_only_persists_target_league_when_provided() -> None:
+    conn = sqlite3.connect(":memory:")
+    initialize_database(conn)
+    payload = {
+        "stashes": [
+            {
+                "stash": "mirage-stash",
+                "league": "Mirage",
+                "accountName": "seller-a",
+                "items": [
+                    {
+                        "id": "mirage-item",
+                        "frameType": 2,
+                        "note": "~price 10 chaos",
+                        "baseType": "Imbued Wand",
+                        "name": "",
+                        "ilvl": 84,
+                        "indexed": "2026-05-11T10:00:00Z",
+                    }
+                ],
+            },
+            {
+                "stash": "standard-stash",
+                "league": "Standard",
+                "accountName": "seller-b",
+                "items": [
+                    {
+                        "id": "standard-item",
+                        "frameType": 2,
+                        "note": "~price 10 chaos",
+                        "baseType": "Vaal Regalia",
+                        "name": "",
+                        "ilvl": 84,
+                        "indexed": "2026-05-11T10:00:00Z",
+                    }
+                ],
+            },
+        ]
+    }
+
+    inserted, duplicates = ingest_stash_page(
+        conn, payload, change_id="change-target", target_league="Mirage"
+    )
+    leagues = conn.execute("SELECT league FROM stash_events").fetchall()
+
+    assert inserted == 1
+    assert duplicates == 0
+    assert leagues == [("Mirage",)]
+
+
 def test_ingest_persists_collection_and_oauth_metadata() -> None:
     conn = sqlite3.connect(":memory:")
     initialize_database(conn)
@@ -471,6 +521,16 @@ def test_update_checkpoint_warns_on_cloud_sync_failure(
         return False
 
     monkeypatch.setattr(
+        "core.cloud_config.load_cloud_config",
+        lambda: MagicMock(
+            backend="supabase",
+            is_configured=True,
+            project_url="https://demo.supabase.co",
+            service_role_key="key",
+        ),
+    )
+
+    monkeypatch.setattr(
         "scripts.firehose_miner.sync_firehose_checkpoint_to_supabase",
         _fake_sync_failure,
     )
@@ -494,6 +554,16 @@ def test_update_checkpoint_warns_on_cloud_exception(
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr(
+        "core.cloud_config.load_cloud_config",
+        lambda: MagicMock(
+            backend="supabase",
+            is_configured=True,
+            project_url="https://demo.supabase.co",
+            service_role_key="key",
+        ),
+    )
+
+    monkeypatch.setattr(
         "scripts.firehose_miner.sync_firehose_checkpoint_to_supabase", _fake_sync_error
     )
 
@@ -503,6 +573,28 @@ def test_update_checkpoint_warns_on_cloud_exception(
         )
 
     assert "falha ao sincronizar checkpoint para Supabase" in caplog.text
+
+
+def test_update_checkpoint_skips_cloud_sync_when_unconfigured(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    conn = sqlite3.connect(str(tmp_path / "firehose.db"))
+    initialize_database(conn)
+
+    def _fake_sync_error(**kwargs):
+        raise AssertionError("Supabase sync should not be called")
+
+    monkeypatch.setattr("core.cloud_config.load_cloud_config", lambda: MagicMock(is_configured=False))
+    monkeypatch.setattr(
+        "scripts.firehose_miner.sync_firehose_checkpoint_to_supabase", _fake_sync_error
+    )
+
+    with caplog.at_level(logging.WARNING):
+        update_checkpoint(
+            conn, "next-id", pages_delta=1, ingested_delta=0, duplicates_delta=0
+        )
+
+    assert "Supabase" not in caplog.text
 
 
 def test_ingest_creates_ndjson_landing_on_each_page(tmp_path) -> None:

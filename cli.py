@@ -198,7 +198,7 @@ def _format_top_evaluation(opportunities):
 
 def _market_evaluation_lines(payload, top=10):
     lines = []
-    for entry in payload.get("top_segments", [])[:top]:
+    for entry in _market_evaluation_entries(payload, top=top):
         segment = entry.get("segment", {})
         for item in entry.get("opportunities", [])[:3]:
             lines.append(
@@ -207,12 +207,37 @@ def _market_evaluation_lines(payload, top=10):
                         str(item.get("mode", "evaluation")),
                         str(item.get("item_id", "unknown")),
                         str(segment.get("item_family", "generic")),
+                        str(segment.get("base_type", "unknown")),
                         f"listed={float(item.get('listed_price', 0.0)):.1f}c",
+                        f"reference={float(item.get('reference_price', 0.0)):.1f}c",
                         f"upside={float(item.get('estimated_upside', 0.0)):.0%}",
                     ]
                 )
             )
     return lines
+
+
+def _market_evaluation_entries(payload, top=10):
+    entries = list(payload.get("top_segments", [])[:top])
+    seen = {_market_segment_identity(entry) for entry in entries}
+    for entry in payload.get("segments", []):
+        score = entry.get("score", {})
+        identity = _market_segment_identity(entry)
+        if score.get("status") != "evaluation_candidate" or identity in seen:
+            continue
+        entries.append(entry)
+        seen.add(identity)
+    return entries
+
+
+def _market_segment_identity(entry):
+    segment = entry.get("segment", {})
+    return (
+        segment.get("key"),
+        segment.get("item_family"),
+        segment.get("base_type"),
+        segment.get("price_band"),
+    )
 
 
 def _render_kpi_panel(stats: ScanStats):
