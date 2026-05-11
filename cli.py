@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import time
+from pathlib import Path
 
 import typer
 from rich.align import Align
@@ -62,6 +63,12 @@ def _scan_results_to_jsonl(results):
 
 def _flip_plans_to_json(plans):
     return json.dumps([plan.to_dict() for plan in plans], indent=2, ensure_ascii=False)
+
+
+def _market_dashboard_to_json(payload, top):
+    output = dict(payload)
+    output["top_segments"] = payload.get("top_segments", [])[:top]
+    return json.dumps(output, indent=2, ensure_ascii=False)
 
 
 def _save_output(path: str, payload: str):
@@ -137,6 +144,75 @@ def _render_scan_table(results, full=False, title=""):
         table.add_row(*row)
 
     return table
+
+
+def _render_market_dashboard_table(payload, top=10):
+    segments = payload.get("top_segments", [])[:top]
+    table = Table(
+        title=f"Market Intelligence ({payload.get('risk_profile', 'balanced')})",
+        expand=True,
+    )
+    table.add_column("Status", style="cyan")
+    table.add_column("Score", justify="right", style="green")
+    table.add_column("Family")
+    table.add_column("Base")
+    table.add_column("Band")
+    table.add_column("Safety", justify="right")
+    table.add_column("Liquidity", justify="right")
+    table.add_column("Margin", justify="right")
+    table.add_column("Trend", justify="right")
+    table.add_column("Top Eval", style="yellow")
+    table.add_column("Why", style="dim")
+
+    for entry in segments:
+        segment = entry.get("segment", {})
+        metrics = entry.get("metrics", {})
+        score = entry.get("score", {})
+        top_eval = _format_top_evaluation(entry.get("opportunities", []))
+        table.add_row(
+            str(score.get("status", "watch")),
+            f"{float(score.get('market_score', 0.0)):.3f}",
+            str(segment.get("item_family", "generic")),
+            str(segment.get("base_type", "unknown")),
+            str(segment.get("price_band", "unknown")),
+            f"{float(metrics.get('safety_score', 0.0)):.2f}",
+            f"{float(metrics.get('liquidity_score', 0.0)):.2f}",
+            f"{float(metrics.get('margin_score', 0.0)):.2f}",
+            f"{float(metrics.get('trend_score', 0.0)):.2f}",
+            top_eval,
+            str(score.get("explanation", "")),
+        )
+    return table
+
+
+def _format_top_evaluation(opportunities):
+    if not opportunities:
+        return "none"
+    item = opportunities[0]
+    item_id = str(item.get("item_id", "unknown"))
+    mode = str(item.get("mode", "evaluation"))
+    listed_price = float(item.get("listed_price", 0.0))
+    upside = float(item.get("estimated_upside", 0.0))
+    return f"{item_id} {listed_price:.1f}c +{upside:.0%} {mode}"
+
+
+def _market_evaluation_lines(payload, top=10):
+    lines = []
+    for entry in payload.get("top_segments", [])[:top]:
+        segment = entry.get("segment", {})
+        for item in entry.get("opportunities", [])[:3]:
+            lines.append(
+                " | ".join(
+                    [
+                        str(item.get("mode", "evaluation")),
+                        str(item.get("item_id", "unknown")),
+                        str(segment.get("item_family", "generic")),
+                        f"listed={float(item.get('listed_price', 0.0)):.1f}c",
+                        f"upside={float(item.get('estimated_upside', 0.0)):.0%}",
+                    ]
+                )
+            )
+    return lines
 
 
 def _render_kpi_panel(stats: ScanStats):
@@ -809,6 +885,35 @@ def craft_plan(
             border_style="dim",
         )
     )
+
+
+@app.command("market-dashboard")
+def market_dashboard(
+    snapshot: Path = typer.Option(
+        Path("data/market_intelligence/latest.json"),
+        "--snapshot",
+        help="Market intelligence snapshot JSON.",
+    ),
+    top: int = typer.Option(10, "--top", min=1, help="Number of segments to show"),
+    output_format: str = typer.Option("table", "--format", help="Formato: table|json"),
+):
+    """Mostra ranking de mercados; não executa compra automática."""
+    if output_format not in {"table", "json"}:
+        raise typer.BadParameter("Formato inválido. Use 'table' ou 'json'.")
+    if not snapshot.exists():
+        raise typer.BadParameter(f"Snapshot not found: {snapshot}")
+
+    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    if output_format == "json":
+        typer.echo(_market_dashboard_to_json(payload, top))
+        return
+
+    console.print(_render_market_dashboard_table(payload, top=top))
+    evaluation_lines = _market_evaluation_lines(payload, top=top)
+    if evaluation_lines:
+        console.print("\n[bold yellow]Evaluation candidates[/bold yellow]")
+        for line in evaluation_lines:
+            console.print(line)
 
 
 @app.command()

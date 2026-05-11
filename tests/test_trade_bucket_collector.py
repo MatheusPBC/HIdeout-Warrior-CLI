@@ -4,6 +4,7 @@ from typing import Any, cast
 from scripts.trade_bucket_collector import (
     build_trade_query,
     collect_trade_bucket_events,
+    get_dynamic_base_types,
     ingest_trade_bucket_rows,
     initialize_trade_bucket_database,
 )
@@ -128,3 +129,75 @@ def test_collect_trade_bucket_respects_bucket_and_run_quotas() -> None:
     assert row[3] >= 0.0
     assert row[4] == 1
     assert row[5] == 1
+
+
+def test_collect_trade_bucket_applies_conservative_request_delays() -> None:
+    conn = sqlite3.connect(":memory:")
+    initialize_trade_bucket_database(conn)
+    sleep_calls: list[float] = []
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.search_calls = 0
+
+        def search_items(self, _query):
+            self.search_calls += 1
+            return f"q-{self.search_calls}", [f"item-{self.search_calls}"]
+
+        def fetch_item_details(self, item_ids, _query_id):
+            return [
+                {
+                    "id": item_ids[0],
+                    "listing": {
+                        "indexed": "2026-03-11T10:00:00Z",
+                        "account": {"name": "seller"},
+                        "price": {"currency": "chaos", "amount": 10.0},
+                    },
+                    "item": {"id": item_ids[0], "baseType": "Imbued Wand", "ilvl": 84},
+                }
+            ]
+
+    collect_trade_bucket_events(
+        client=cast(Any, _FakeClient()),
+        conn=conn,
+        league="Standard",
+        base_types=["Imbued Wand"],
+        buckets=[(1, 15), (16, 50)],
+        run_id="run-x",
+        max_items_per_bucket=1,
+        max_searches_per_run=2,
+        max_fetches_per_run=2,
+        search_delay_seconds=3.0,
+        fetch_delay_seconds=1.0,
+        sleep_func=sleep_calls.append,
+    )
+
+    assert sleep_calls == [3.0, 1.0, 3.0, 1.0]
+
+
+def test_get_dynamic_base_types_prioritizes_firehose_activity() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE stash_events (
+            base_type TEXT,
+            league TEXT,
+            price_chaos REAL
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO stash_events (base_type, league, price_chaos) VALUES (?, ?, ?)",
+        [
+            ("Opal Ring", "Mercenaries", 40.0),
+            ("Opal Ring", "Mercenaries", 45.0),
+            ("Imbued Wand", "Mercenaries", 90.0),
+            ("Vaal Regalia", "Standard", 80.0),
+            ("", "Mercenaries", 10.0),
+            ("Gold Coin", "Mercenaries", 0.0),
+        ],
+    )
+
+    bases = get_dynamic_base_types(conn, league="Mercenaries", limit=2)
+
+    assert bases == ["Opal Ring", "Imbued Wand"]

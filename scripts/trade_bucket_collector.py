@@ -35,6 +35,8 @@ DEFAULT_BASE_TYPES: Tuple[str, ...] = (
 DEFAULT_MAX_SEARCHES_PER_RUN = 60
 DEFAULT_MAX_FETCHES_PER_RUN = 300
 DEFAULT_SCAN_PROFILE = "default_bucket_scan"
+DEFAULT_SEARCH_DELAY_SECONDS = 8.0
+DEFAULT_FETCH_DELAY_SECONDS = 3.0
 
 
 def _utc_now_iso() -> str:
@@ -302,6 +304,39 @@ def _batched_ids(item_ids: Sequence[str], batch_size: int = 10) -> Iterable[List
         yield list(item_ids[idx : idx + batch_size])
 
 
+def get_dynamic_base_types(
+    conn: sqlite3.Connection,
+    *,
+    league: str,
+    limit: int = 8,
+) -> List[str]:
+    if limit <= 0 or not _table_exists(conn, "stash_events"):
+        return []
+    rows = conn.execute(
+        """
+        SELECT base_type, COUNT(*) AS seen_count
+        FROM stash_events
+        WHERE league = ?
+          AND base_type IS NOT NULL
+          AND TRIM(base_type) != ''
+          AND price_chaos > 0
+        GROUP BY base_type
+        ORDER BY seen_count DESC, base_type ASC
+        LIMIT ?
+        """,
+        (league, int(limit)),
+    ).fetchall()
+    return [str(row[0]) for row in rows if str(row[0]).strip()]
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
 def collect_trade_bucket_events(
     *,
     client: MarketAPIClient,
@@ -313,6 +348,9 @@ def collect_trade_bucket_events(
     max_items_per_bucket: int,
     max_searches_per_run: int,
     max_fetches_per_run: int,
+    search_delay_seconds: float = 0.0,
+    fetch_delay_seconds: float = 0.0,
+    sleep_func=time.sleep,
 ) -> Dict[str, int]:
     totals = {
         "searches": 0,
@@ -338,6 +376,7 @@ def collect_trade_bucket_events(
             try:
                 query_id, result_ids = client.search_items(query)
                 totals["searches"] += 1
+                _sleep_if_needed(search_delay_seconds, sleep_func)
                 search_batch = totals["searches"]
                 if not query_id or not result_ids:
                     continue
@@ -350,6 +389,7 @@ def collect_trade_bucket_events(
                         break
                     details = client.fetch_item_details(batch, query_id)
                     totals["fetches"] += 1
+                    _sleep_if_needed(fetch_delay_seconds, sleep_func)
                     fetch_batch = totals["fetches"]
 
                     for detail in details:
@@ -392,6 +432,12 @@ def collect_trade_bucket_events(
     return totals
 
 
+def _sleep_if_needed(seconds: float, sleep_func) -> None:
+    if seconds <= 0:
+        return
+    sleep_func(float(seconds))
+
+
 def main(
     db_path: str = typer.Option("data/firehose.db", "--db-path", help="SQLite path"),
     league: str = typer.Option("Standard", "--league", help="PoE league"),
@@ -408,6 +454,29 @@ def main(
         "--max-fetches-per-run",
         help="Max Trade API fetch calls per run",
     ),
+    dynamic_bases: bool = typer.Option(
+        True,
+        "--dynamic-bases/--static-bases",
+        help="Use most observed firehose base types before static defaults",
+    ),
+    dynamic_base_limit: int = typer.Option(
+        8,
+        "--dynamic-base-limit",
+        min=1,
+        help="Max dynamic base types read from firehose stash_events",
+    ),
+    search_delay_seconds: float = typer.Option(
+        DEFAULT_SEARCH_DELAY_SECONDS,
+        "--search-delay-seconds",
+        min=0.0,
+        help="Delay after each Trade API search request",
+    ),
+    fetch_delay_seconds: float = typer.Option(
+        DEFAULT_FETCH_DELAY_SECONDS,
+        "--fetch-delay-seconds",
+        min=0.0,
+        help="Delay after each Trade API fetch request",
+    ),
 ) -> None:
     run_id = str(int(time.time() * 1000))
     started_at = time.time()
@@ -417,6 +486,12 @@ def main(
     conn = sqlite3.connect(str(db_file))
     initialize_trade_bucket_database(conn)
     client = MarketAPIClient(league=league)
+    base_types = list(DEFAULT_BASE_TYPES)
+    if dynamic_bases:
+        dynamic_base_types = get_dynamic_base_types(
+            conn, league=client.league, limit=dynamic_base_limit
+        )
+        base_types = dynamic_base_types or base_types
 
     status = "ok"
     totals: Dict[str, int] = {
@@ -432,12 +507,14 @@ def main(
             client=client,
             conn=conn,
             league=client.league,
-            base_types=DEFAULT_BASE_TYPES,
+            base_types=base_types,
             buckets=DEFAULT_BUCKETS,
             run_id=run_id,
             max_items_per_bucket=max_items_per_bucket,
             max_searches_per_run=max_searches_per_run,
             max_fetches_per_run=max_fetches_per_run,
+            search_delay_seconds=search_delay_seconds,
+            fetch_delay_seconds=fetch_delay_seconds,
         )
     except Exception:
         status = "error"
@@ -465,6 +542,11 @@ def main(
             "max_items_per_bucket": max_items_per_bucket,
             "max_searches_per_run": max_searches_per_run,
             "max_fetches_per_run": max_fetches_per_run,
+            "dynamic_bases": dynamic_bases,
+            "dynamic_base_limit": dynamic_base_limit,
+            "base_types": base_types,
+            "search_delay_seconds": search_delay_seconds,
+            "fetch_delay_seconds": fetch_delay_seconds,
             **totals,
         },
     )

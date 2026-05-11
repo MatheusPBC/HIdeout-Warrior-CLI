@@ -1,6 +1,7 @@
 data/*.xgb
 .venv/
 __pycache__/
+*.pyc
 core/__pycache__/
 scripts/__pycache__/
 tests/__pycache__/
