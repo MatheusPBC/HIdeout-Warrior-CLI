@@ -10,6 +10,8 @@ import typer
 
 app = typer.Typer(help="Build XGBoost market simulation reports")
 
+EXCLUDED_MANUAL_REVIEW_FAMILIES = {"map", "gem", "flask"}
+
 
 @dataclass(frozen=True)
 class SimulationReportResult:
@@ -142,6 +144,7 @@ def _rank_candidates(latest: dict[str, Any], model_by_family: dict[str, dict[str
         "skip_weak_model": 2,
         "skip_no_model": 3,
         "skip_no_edge": 4,
+        "skip_excluded_family": 5,
     }
     return sorted(
         candidates,
@@ -169,7 +172,14 @@ def _candidate_row(
     confidence_margin = expected_profit - model_mae
     status = str(score.get("status") or "watch")
     return {
-        "decision": _decision(model, confidence_margin, listed, expected_profit, status),
+        "decision": _decision(
+            model,
+            confidence_margin,
+            listed,
+            expected_profit,
+            status,
+            family,
+        ),
         "item_id": str(opportunity.get("item_id") or "unknown"),
         "family": family,
         "base_type": str(segment.get("base_type") or opportunity.get("base_type") or "unknown"),
@@ -193,7 +203,10 @@ def _decision(
     listed: float,
     expected_profit: float,
     status: str,
+    family: str,
 ) -> str:
+    if family in EXCLUDED_MANUAL_REVIEW_FAMILIES:
+        return "skip_excluded_family"
     if not model:
         return "skip_no_model"
     rmse_ratio = model.get("rmse_ratio")

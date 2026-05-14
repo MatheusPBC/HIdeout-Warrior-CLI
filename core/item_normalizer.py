@@ -10,6 +10,9 @@ ITEM_FAMILIES = (
     "body_armour_defense",
     "jewel_cluster",
     "accessory_generic",
+    "map",
+    "gem",
+    "flask",
     "generic",
 )
 
@@ -18,6 +21,9 @@ LOW_ILVL_THRESHOLDS = {
     "body_armour_defense": 84,
     "jewel_cluster": 84,
     "accessory_generic": 82,
+    "map": 1,
+    "gem": 1,
+    "flask": 1,
     "generic": 80,
 }
 
@@ -26,6 +32,9 @@ HIGH_TIER_MIN_ILVL_THRESHOLDS = {
     "body_armour_defense": 84,
     "jewel_cluster": 84,
     "accessory_generic": 80,
+    "map": 1,
+    "gem": 1,
+    "flask": 1,
     "generic": 78,
 }
 
@@ -375,6 +384,12 @@ def _extract_tag_tokens(
 def classify_item_family(base_type: str, tag_tokens: Iterable[str]) -> str:
     base_lower = base_type.lower()
     tags = set(tag_tokens)
+    if "map" in base_lower:
+        return "map"
+    if "gem" in tags or "support" in base_lower:
+        return "gem"
+    if "flask" in base_lower:
+        return "flask"
     if "wand" in base_lower or {"wand", "caster"}.issubset(tags):
         return "wand_caster"
     if "jewel" in base_lower:

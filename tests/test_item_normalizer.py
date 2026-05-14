@@ -57,6 +57,14 @@ def test_classify_item_family_prefers_accessory_and_jewel_groups():
     assert classify_item_family("Large Cluster Jewel", ["jewel"]) == "jewel_cluster"
 
 
+def test_classify_item_family_splits_market_commodity_noise():
+    assert classify_item_family("Map (Tier 16)", []) == "map"
+    assert classify_item_family("Blade Vortex", ["gem"]) == "gem"
+    assert classify_item_family("Empower Support", []) == "gem"
+    assert classify_item_family("Quicksilver Flask", []) == "flask"
+    assert classify_item_family("Basalt Flask", []) == "flask"
+
+
 def test_normalize_trade_item_extracts_native_tier_metadata():
     raw = {
         "listing": {
