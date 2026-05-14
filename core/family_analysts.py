@@ -177,6 +177,167 @@ class JewelClusterAnalyst:
         )
 
 
+class AccessoryAnalyst:
+    name = "AccessoryAnalyst"
+    _PREMIUM_BASES = {"cord belt", "simplex amulet", "bone ring", "stygian vise"}
+
+    def analyze(
+        self,
+        *,
+        segment: dict[str, Any],
+        metrics: dict[str, Any],
+        opportunity: dict[str, Any],
+        model: dict[str, Any] | None,
+    ) -> FamilyAnalysis:
+        payload = {**opportunity, **segment}
+        base_type = _normalize_text(payload.get("base_type"))
+        tokens = _token_set(payload)
+        ilvl = _coerce_int(payload.get("ilvl") or payload.get("item_level")) or 0
+        reasons: list[str] = []
+        risks: list[str] = []
+
+        has_core_stats = bool(tokens & {"life", "energyshield", "plusallgems"})
+        if "amulet" in base_type and not has_core_stats:
+            risks.append("amulet_missing_life_es_or_gem_levels")
+        if risks:
+            return _excluded_analysis("accessory_generic", self.name, "accessory", risks)
+
+        score = 0.0
+        if base_type in self._PREMIUM_BASES:
+            score += 35.0
+            reasons.append("premium_accessory_base")
+        if ilvl >= 85:
+            score += 25.0
+            reasons.append("ilvl_85_plus")
+        if tokens & {"plusallgems", "negative_lightning_resistance", "infamy"}:
+            score += 30.0
+            reasons.append("transformational_accessory_mod")
+        if _coerce_int(payload.get("open_suffixes")) or _coerce_int(payload.get("open_prefixes")):
+            score += 10.0
+            reasons.append("open_affix_for_crafting")
+
+        return _scored_analysis("accessory_generic", self.name, "accessory", score, reasons)
+
+
+class WandCasterAnalyst:
+    name = "WandCasterAnalyst"
+
+    def analyze(
+        self,
+        *,
+        segment: dict[str, Any],
+        metrics: dict[str, Any],
+        opportunity: dict[str, Any],
+        model: dict[str, Any] | None,
+    ) -> FamilyAnalysis:
+        payload = {**opportunity, **segment}
+        base_type = _normalize_text(payload.get("base_type"))
+        tokens = _token_set(payload)
+        reasons: list[str] = []
+        risks: list[str] = []
+
+        has_caster_core = bool(tokens & {"plusallspellgems", "plusallgems", "castspeed", "miniondamage", "infamy"})
+        if "wand" in base_type and "addedattackdamage" in tokens and not has_caster_core:
+            risks.append("attack_damage_wand_without_caster_core")
+        if risks:
+            return _excluded_analysis("wand_caster", self.name, "caster_weapon", risks)
+
+        score = 0.0
+        if tokens & {"plusallspellgems", "plusallgems"}:
+            score += 40.0
+            reasons.append("plus_spell_gem_level")
+        if "castspeed" in tokens:
+            score += 20.0
+            reasons.append("cast_speed")
+        if _coerce_int(payload.get("open_suffixes")):
+            score += 20.0
+            reasons.append("open_suffix_for_trigger")
+        if tokens & {"infamy", "miniondamage"}:
+            score += 25.0
+            reasons.append("premium_wand_modifier")
+
+        return _scored_analysis("wand_caster", self.name, "caster_weapon", score, reasons)
+
+
+class BodyArmourDefenseAnalyst:
+    name = "BodyArmourDefenseAnalyst"
+
+    def analyze(
+        self,
+        *,
+        segment: dict[str, Any],
+        metrics: dict[str, Any],
+        opportunity: dict[str, Any],
+        model: dict[str, Any] | None,
+    ) -> FamilyAnalysis:
+        payload = {**opportunity, **segment}
+        tokens = _token_set(payload)
+        ilvl = _coerce_int(payload.get("ilvl") or payload.get("item_level")) or 0
+        reasons: list[str] = []
+        risks: list[str] = []
+
+        has_defensive_core = bool(tokens & {"spellsuppress", "life", "energyshield", "armour", "evasion", "infamy"})
+        if ilvl < 84 and not has_defensive_core:
+            risks.append("low_ilvl_without_defensive_core")
+        if {"stunrecovery", "reflectmelee", "liferegen"}.issubset(tokens):
+            risks.append("junk_defensive_mod_bundle")
+        if risks:
+            return _excluded_analysis("body_armour_defense", self.name, "defensive_body_armour", risks)
+
+        score = 0.0
+        if ilvl >= 86:
+            score += 35.0
+            reasons.append("scarce_ilvl_86_base")
+        if "spellsuppress" in tokens:
+            score += 30.0
+            reasons.append("spell_suppression")
+        if tokens & {"life", "energyshield", "armour", "evasion"}:
+            score += 20.0
+            reasons.append("defensive_core_stats")
+        if _coerce_int(payload.get("open_prefixes")):
+            score += 10.0
+            reasons.append("open_prefix_for_crafting")
+
+        return _scored_analysis("body_armour_defense", self.name, "defensive_body_armour", score, reasons)
+
+
+def _excluded_analysis(
+    family: str, analyst: str, archetype: str, risks: list[str]
+) -> FamilyAnalysis:
+    return FamilyAnalysis(
+        family=family,
+        analyst=analyst,
+        archetype=archetype,
+        score=0.0,
+        confidence=0.75,
+        decision="exclude",
+        reasons=[],
+        risks=risks,
+    )
+
+
+def _scored_analysis(
+    family: str, analyst: str, archetype: str, score: float, reasons: list[str]
+) -> FamilyAnalysis:
+    decision = "valid_for_manual_review" if score >= 70.0 else "watch_only"
+    risks = [] if reasons else ["missing_family_evidence"]
+    return FamilyAnalysis(
+        family=family,
+        analyst=analyst,
+        archetype=archetype,
+        score=round(score, 2),
+        confidence=0.65 if reasons else 0.2,
+        decision=decision if reasons else "needs_more_evidence",
+        reasons=reasons,
+        risks=risks,
+    )
+
+
+def _token_set(payload: dict[str, Any]) -> set[str]:
+    raw_tokens = payload.get("mod_tokens") or payload.get("tag_tokens") or []
+    return {_normalize_text(token).replace(" ", "") for token in raw_tokens}
+
+
 def _cluster_evidence(
     segment: dict[str, Any], opportunity: dict[str, Any]
 ) -> dict[str, Any]:
@@ -234,7 +395,10 @@ def _coerce_cluster_size(value: Any, base_text: str) -> str:
 
 _GENERIC_ANALYST = GenericFamilyAnalyst()
 _ANALYSTS: dict[str, FamilyAnalyst] = {
+    "accessory_generic": AccessoryAnalyst(),
+    "body_armour_defense": BodyArmourDefenseAnalyst(),
     "jewel_cluster": JewelClusterAnalyst(),
+    "wand_caster": WandCasterAnalyst(),
 }
 
 
