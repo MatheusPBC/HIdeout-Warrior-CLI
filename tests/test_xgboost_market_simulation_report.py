@@ -79,7 +79,7 @@ def test_build_simulation_report_saves_ranked_json_and_log(tmp_path) -> None:
     assert payload["top_candidates"][0]["item_id"] == "candidate-1"
     assert payload["top_candidates"][0]["confidence_margin_after_mae"] == 28.0
     assert payload["top_candidates"][0]["family_analyst"] == "JewelClusterAnalyst"
-    assert "cluster_jewel_rules_pending" in payload["top_candidates"][0]["analysis_risks"]
+    assert "missing_cluster_evidence" in payload["top_candidates"][0]["analysis_risks"]
     assert "valid_for_manual_review | candidate-1" in log_text
 
 

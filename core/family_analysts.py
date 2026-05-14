@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
@@ -78,6 +79,20 @@ class GenericFamilyAnalyst:
 
 class JewelClusterAnalyst:
     name = "JewelClusterAnalyst"
+    _PREMIUM_ENCHANTS = {
+        "minion damage",
+        "aura effect",
+        "spell damage",
+        "armour",
+        "physical damage",
+        "attack damage",
+    }
+    _BAIT_ENCHANTS = {
+        "dual wielding",
+        "totem damage",
+        "brand damage",
+        "shield damage",
+    }
 
     def analyze(
         self,
@@ -87,16 +102,134 @@ class JewelClusterAnalyst:
         opportunity: dict[str, Any],
         model: dict[str, Any] | None,
     ) -> FamilyAnalysis:
+        evidence = _cluster_evidence(segment, opportunity)
+        if not evidence["cluster_size"] or evidence["passives"] is None:
+            return FamilyAnalysis(
+                family="jewel_cluster",
+                analyst=self.name,
+                archetype="cluster_jewel_unknown",
+                score=0.0,
+                confidence=0.2,
+                decision="needs_more_evidence",
+                reasons=[],
+                risks=["missing_cluster_evidence"],
+            )
+
+        reasons: list[str] = []
+        risks: list[str] = []
+        cluster_size = evidence["cluster_size"]
+        passives = evidence["passives"]
+        ilvl = evidence["ilvl"] or 0
+        enchant = evidence["enchant"]
+        notables = evidence["notables"]
+
+        if "primordial bond" in notables:
+            risks.append("bad_meta_notable_primordial_bond")
+        if cluster_size == "large" and passives >= 10 and ilvl < 84:
+            risks.append("large_cluster_too_many_passives_below_ilvl_84")
+        if cluster_size == "medium" and passives == 6:
+            risks.append("medium_cluster_six_passives")
+        if enchant in self._BAIT_ENCHANTS:
+            risks.append("bait_cluster_enchant")
+
+        if risks:
+            return FamilyAnalysis(
+                family="jewel_cluster",
+                analyst=self.name,
+                archetype=f"{cluster_size}_cluster",
+                score=0.0,
+                confidence=0.75,
+                decision="exclude",
+                reasons=[],
+                risks=risks,
+            )
+
+        score = 0.0
+        if cluster_size == "large" and passives == 8:
+            score += 35.0
+            reasons.append("premium_large_8_passives")
+        if cluster_size == "medium" and passives in {4, 5}:
+            score += 30.0
+            reasons.append("efficient_medium_passives")
+        if cluster_size == "small" and passives == 2:
+            score += 25.0
+            reasons.append("efficient_small_passives")
+        if ilvl >= 84:
+            score += 25.0
+            reasons.append("ilvl_84_plus")
+        if enchant in self._PREMIUM_ENCHANTS:
+            score += 20.0
+            reasons.append("premium_cluster_enchant")
+
+        decision = "watch_only"
+        if score >= 70.0:
+            decision = "valid_for_manual_review"
+
         return FamilyAnalysis(
             family="jewel_cluster",
             analyst=self.name,
-            archetype="pending_cluster_jewel_rubric",
-            score=0.0,
-            confidence=0.2,
-            decision="needs_domain_rules",
-            reasons=[],
-            risks=["cluster_jewel_rules_pending"],
+            archetype=f"{cluster_size}_cluster",
+            score=round(score, 2),
+            confidence=0.65,
+            decision=decision,
+            reasons=reasons,
+            risks=risks,
         )
+
+
+def _cluster_evidence(
+    segment: dict[str, Any], opportunity: dict[str, Any]
+) -> dict[str, Any]:
+    payload = {**opportunity, **segment}
+    base_text = _normalize_text(payload.get("base_type"))
+    enchant = _normalize_text(
+        payload.get("cluster_enchant")
+        or payload.get("enchant")
+        or payload.get("base_enchant")
+    )
+    cluster_size = _coerce_cluster_size(payload.get("cluster_size"), base_text)
+    passives = _coerce_int(
+        payload.get("cluster_passives")
+        or payload.get("passives")
+        or payload.get("added_passives")
+    )
+    ilvl = _coerce_int(payload.get("ilvl") or payload.get("item_level"))
+    notables = {
+        _normalize_text(notable)
+        for notable in payload.get("notables", [])
+        if _normalize_text(notable)
+    }
+    return {
+        "cluster_size": cluster_size,
+        "passives": passives,
+        "ilvl": ilvl,
+        "enchant": enchant,
+        "notables": notables,
+    }
+
+
+def _normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        match = re.search(r"\d+", str(value))
+        return int(match.group(0)) if match else None
+
+
+def _coerce_cluster_size(value: Any, base_text: str) -> str:
+    text = _normalize_text(value) or base_text
+    for cluster_size in ("large", "medium", "small"):
+        if cluster_size in text:
+            return cluster_size
+    return ""
 
 
 _GENERIC_ANALYST = GenericFamilyAnalyst()
