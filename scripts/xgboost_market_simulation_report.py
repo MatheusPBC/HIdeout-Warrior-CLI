@@ -7,6 +7,8 @@ from typing import Any
 import pandas as pd
 import typer
 
+from core.family_analysts import analyze_family_candidate
+
 
 app = typer.Typer(help="Build XGBoost market simulation reports")
 
@@ -171,6 +173,13 @@ def _candidate_row(
     model_mae = float(model.get("mae") or 0.0) if model else 0.0
     confidence_margin = expected_profit - model_mae
     status = str(score.get("status") or "watch")
+    family_analysis = analyze_family_candidate(
+        family=family,
+        segment=segment,
+        metrics=metrics,
+        opportunity=opportunity,
+        model=model,
+    )
     return {
         "decision": _decision(
             model,
@@ -194,6 +203,13 @@ def _candidate_row(
         "model_mae": model_mae if model else None,
         "confidence_margin_after_mae": round(confidence_margin, 2),
         "model_rmse_ratio": model.get("rmse_ratio") if model else None,
+        "family_analyst": family_analysis.analyst,
+        "analysis_archetype": family_analysis.archetype,
+        "analysis_score": family_analysis.score,
+        "analysis_confidence": family_analysis.confidence,
+        "analysis_reasons": family_analysis.reasons,
+        "analysis_risks": family_analysis.risks,
+        "analysis_decision": family_analysis.decision,
     }
 
 
