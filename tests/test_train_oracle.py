@@ -15,6 +15,7 @@ from scripts.train_oracle import (
     fetch_training_data_from_parquet,
     fetch_training_data_from_sqlite,
     load_training_dataframe,
+    parse_trade_item_to_features,
     persist_model_metadata,
     run_quality_gates,
     split_dataset_for_training,
@@ -28,6 +29,39 @@ def test_classify_ilvl_band_boundaries() -> None:
     assert classify_ilvl_band(75) == "mid"
     assert classify_ilvl_band(83) == "mid"
     assert classify_ilvl_band(84) == "high"
+
+
+def test_parse_trade_item_to_features_preserves_cluster_evidence() -> None:
+    features = parse_trade_item_to_features(
+        {
+            "listing": {
+                "whisper": "@seller hi",
+                "indexed": "2026-05-14T10:00:00Z",
+                "account": {"name": "seller"},
+                "price": {"amount": 90.0, "currency": "chaos"},
+            },
+            "item": {
+                "id": "cluster-1",
+                "baseType": "Large Cluster Jewel",
+                "ilvl": 84,
+                "enchantMods": [
+                    "Adds 8 Passive Skills",
+                    "Added Small Passive Skills grant: 12% increased Minion Damage",
+                ],
+                "explicitMods": ["1 Added Passive Skill is Renewal"],
+                "implicitMods": [],
+            },
+        },
+        currency_rates={},
+    )
+
+    assert features is not None
+    assert features["cluster_size"] == "large"
+    assert features["cluster_passives"] == 8
+    assert features["cluster_enchant"] == "Minion Damage"
+    assert features["notables"] == ["Renewal"]
+    assert features["ilvl"] == 84
+    assert "mod_tokens" in features
 
 
 def test_train_family_band_models_trains_when_band_has_minimum_rows(

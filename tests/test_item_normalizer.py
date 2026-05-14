@@ -65,6 +65,44 @@ def test_classify_item_family_splits_market_commodity_noise():
     assert classify_item_family("Basalt Flask", []) == "flask"
 
 
+def test_normalize_trade_item_extracts_cluster_jewel_evidence():
+    raw = {
+        "listing": {
+            "whisper": "@seller hi",
+            "indexed": "2026-05-14T10:00:00Z",
+            "account": {"name": "seller"},
+            "price": {"amount": 90.0, "currency": "chaos"},
+        },
+        "item": {
+            "id": "cluster-1",
+            "baseType": "Large Cluster Jewel",
+            "ilvl": 84,
+            "enchantMods": [
+                "Adds 8 Passive Skills",
+                "Added Small Passive Skills grant: 12% increased Minion Damage",
+            ],
+            "explicitMods": [
+                "1 Added Passive Skill is Renewal",
+                "1 Added Passive Skill is Feasting Fiends",
+            ],
+            "implicitMods": [],
+        },
+    }
+
+    normalized = normalize_trade_item(
+        raw,
+        listed_price=90.0,
+        listing_currency="chaos",
+        listing_amount=90.0,
+    )
+
+    assert normalized is not None
+    assert normalized.cluster_size == "large"
+    assert normalized.cluster_passives == 8
+    assert normalized.cluster_enchant == "Minion Damage"
+    assert normalized.notables == ["Renewal", "Feasting Fiends"]
+
+
 def test_normalize_trade_item_extracts_native_tier_metadata():
     raw = {
         "listing": {

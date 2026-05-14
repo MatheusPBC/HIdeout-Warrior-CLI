@@ -1,5 +1,5 @@
 import ast
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import pandas as pd
@@ -77,6 +77,15 @@ class MarketOpportunityCandidate:
     reference_price: float
     estimated_upside: float
     freshness_band: str
+    ilvl: int = 0
+    open_prefixes: int = 0
+    open_suffixes: int = 0
+    mod_tokens: list[str] = field(default_factory=list)
+    tag_tokens: list[str] = field(default_factory=list)
+    cluster_size: str = ""
+    cluster_passives: int | None = None
+    cluster_enchant: str = ""
+    notables: list[str] = field(default_factory=list)
     mode: str = "evaluation"
 
     def to_dict(self) -> dict:
@@ -225,6 +234,15 @@ def _build_opportunities(group: pd.DataFrame) -> list[MarketOpportunityCandidate
                 reference_price=round(reference_price, 2),
                 estimated_upside=round(upside, 4),
                 freshness_band=freshness_band,
+                ilvl=_coerce_int(row.get("ilvl")),
+                open_prefixes=_coerce_int(row.get("open_prefixes")),
+                open_suffixes=_coerce_int(row.get("open_suffixes")),
+                mod_tokens=_coerce_tokens(row.get("mod_tokens")),
+                tag_tokens=_coerce_tokens(row.get("tag_tokens")),
+                cluster_size=_clean_value(row.get("cluster_size"), ""),
+                cluster_passives=_coerce_optional_int(row.get("cluster_passives")),
+                cluster_enchant=_clean_value(row.get("cluster_enchant"), ""),
+                notables=_coerce_tokens(row.get("notables")),
             )
         )
     return sorted(candidates, key=lambda item: item.estimated_upside, reverse=True)[:5]
@@ -235,6 +253,20 @@ def _clean_value(value: Any, default: str) -> str:
         return default
     text = str(value).strip()
     return text or default
+
+
+def _coerce_int(value: Any) -> int:
+    parsed = _coerce_optional_int(value)
+    return parsed if parsed is not None else 0
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _price_band(value: Any) -> str:

@@ -225,6 +225,55 @@ def test_build_market_segments_includes_evaluation_opportunities() -> None:
     assert segment.opportunities[0].estimated_upside == 0.375
 
 
+def test_market_opportunities_preserve_family_evidence_fields() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "item_id": "cluster-expensive",
+                "league": "Mirage",
+                "item_family": "jewel_cluster",
+                "base_type": "Large Cluster Jewel",
+                "ilvl": 84,
+                "ilvl_band": "high",
+                "price_chaos": 140.0,
+                "cluster_size": "large",
+                "cluster_passives": 8,
+                "cluster_enchant": "Minion Damage",
+                "notables": ["Renewal"],
+                "mod_tokens": ["ClusterPassive"],
+                "tag_tokens": ["jewel"],
+                "freshness_band": "fresh",
+            },
+            {
+                "item_id": "cluster-cheap",
+                "league": "Mirage",
+                "item_family": "jewel_cluster",
+                "base_type": "Large Cluster Jewel",
+                "ilvl": 84,
+                "ilvl_band": "high",
+                "price_chaos": 80.0,
+                "cluster_size": "large",
+                "cluster_passives": 8,
+                "cluster_enchant": "Minion Damage",
+                "notables": ["Renewal"],
+                "mod_tokens": ["ClusterPassive"],
+                "tag_tokens": ["jewel"],
+                "freshness_band": "fresh",
+            },
+        ]
+    )
+
+    opportunity = build_market_segments(frame)[0].opportunities[0].to_dict()
+
+    assert opportunity["item_id"] == "cluster-cheap"
+    assert opportunity["ilvl"] == 84
+    assert opportunity["cluster_size"] == "large"
+    assert opportunity["cluster_passives"] == 8
+    assert opportunity["cluster_enchant"] == "Minion Damage"
+    assert opportunity["notables"] == ["Renewal"]
+    assert opportunity["mod_tokens"] == ["ClusterPassive"]
+
+
 def test_market_segments_support_gold_schema_without_item_tokens() -> None:
     frame = pd.DataFrame(
         [

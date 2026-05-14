@@ -113,11 +113,20 @@ def parse_trade_item_to_features(
     feature_row.update(
         {
             "item_family": normalized.item_family,
+            "ilvl": normalized.ilvl,
             "ilvl_band": classify_ilvl_band(normalized.ilvl),
             "base_type": normalized.base_type,
             "listed_at": normalized.listed_at,
             "price_chaos": round(normalized.listed_price, 1),
             "meta_utility_score": meta_utility_score,
+            "open_prefixes": normalized.open_prefixes,
+            "open_suffixes": normalized.open_suffixes,
+            "mod_tokens": normalized.mod_tokens,
+            "tag_tokens": normalized.tag_tokens,
+            "cluster_size": normalized.cluster_size,
+            "cluster_passives": normalized.cluster_passives,
+            "cluster_enchant": normalized.cluster_enchant,
+            "notables": normalized.notables,
         }
     )
     return feature_row

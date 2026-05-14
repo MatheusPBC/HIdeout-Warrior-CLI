@@ -71,6 +71,10 @@ class NormalizedMarketItem:
     tier_ilvl_mismatch: bool = False
     low_ilvl_context: bool = False
     fractured_low_ilvl_brick: bool = False
+    cluster_size: str = ""
+    cluster_passives: Optional[int] = None
+    cluster_enchant: str = ""
+    notables: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -436,6 +440,52 @@ def _is_implausible_high_tier(item_family: str, ilvl: int, tier: int) -> bool:
     return ilvl < threshold
 
 
+def _clean_cluster_enchant(raw_enchant: str) -> str:
+    text = raw_enchant.strip()
+    marker = "Added Small Passive Skills grant:"
+    if marker in text:
+        text = text.split(marker, 1)[1].strip()
+    text = re.sub(r"^\d+(?:\.\d+)?%\s+increased\s+", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+def _extract_cluster_jewel_evidence(item_data: Dict[str, Any]) -> Dict[str, Any]:
+    base_type = str(item_data.get("baseType") or "").lower()
+    cluster_size = ""
+    for candidate in ("large", "medium", "small"):
+        if candidate in base_type:
+            cluster_size = candidate
+            break
+
+    cluster_passives: Optional[int] = None
+    cluster_enchant = ""
+    notables: List[str] = []
+    mods = list(item_data.get("enchantMods", []) or []) + list(
+        item_data.get("explicitMods", []) or []
+    )
+    for mod in mods:
+        text = str(mod)
+        passive_match = re.search(r"adds\s+(\d+)\s+passive\s+skills", text, re.IGNORECASE)
+        if passive_match:
+            cluster_passives = int(passive_match.group(1))
+        if "Added Small Passive Skills grant:" in text:
+            cluster_enchant = _clean_cluster_enchant(text)
+        notable_match = re.search(
+            r"(?:\d+\s+)?added passive skill is\s+(.+)$",
+            text,
+            re.IGNORECASE,
+        )
+        if notable_match:
+            notables.append(notable_match.group(1).strip())
+
+    return {
+        "cluster_size": cluster_size,
+        "cluster_passives": cluster_passives,
+        "cluster_enchant": cluster_enchant,
+        "notables": list(dict.fromkeys(notables)),
+    }
+
+
 def normalize_trade_item(
     item_json: Dict[str, Any],
     listed_price: float,
@@ -489,6 +539,7 @@ def normalize_trade_item(
         tier_source = "none"
 
     prefix_count, suffix_count = _count_affixes(mod_tokens, explicit_mods)
+    cluster_evidence = _extract_cluster_jewel_evidence(item_data)
 
     return NormalizedMarketItem(
         item_id=item_data.get("id", ""),
@@ -519,6 +570,10 @@ def normalize_trade_item(
         tier_ilvl_mismatch=tier_ilvl_mismatch,
         low_ilvl_context=low_ilvl_context,
         fractured_low_ilvl_brick=fractured_low_ilvl_brick,
+        cluster_size=cluster_evidence["cluster_size"],
+        cluster_passives=cluster_evidence["cluster_passives"],
+        cluster_enchant=cluster_evidence["cluster_enchant"],
+        notables=cluster_evidence["notables"],
     )
 
 
