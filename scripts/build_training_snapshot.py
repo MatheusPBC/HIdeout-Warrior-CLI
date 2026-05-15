@@ -46,6 +46,14 @@ def _safe_json_load(raw_payload: Any) -> Optional[Dict[str, Any]]:
     return parsed
 
 
+def _make_hashable(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(_make_hashable(item) for item in value)
+    if isinstance(value, dict):
+        return tuple(sorted((key, _make_hashable(item)) for key, item in value.items()))
+    return value
+
+
 def _stable_event_key(row: Dict[str, Any], normalized_raw_json: str) -> str:
     candidate = "|".join(
         [
@@ -645,7 +653,8 @@ def build_gold_dataframe(silver_df: pd.DataFrame) -> pd.DataFrame:
     dedupe_subset = [
         col for col in frame.columns if col not in {"snapshot_date", "league"}
     ]
-    frame = frame.drop_duplicates(subset=dedupe_subset, keep="last")
+    dedupe_frame = frame[dedupe_subset].map(_make_hashable)
+    frame = frame.loc[~dedupe_frame.duplicated(keep="last")]
     return frame.reset_index(drop=True)
 
 

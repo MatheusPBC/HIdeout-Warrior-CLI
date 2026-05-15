@@ -253,6 +253,63 @@ def test_build_training_snapshot_filters_target_league_and_replaces_old_output(
     assert not (out_dir / "bronze" / "snapshot_date=2026-05-11" / "league=Standard").exists()
 
 
+def test_build_gold_dataframe_dedupes_rows_with_list_evidence() -> None:
+    raw_item = pd.Series(
+        {
+            "id": "cluster-1",
+            "baseType": "Large Cluster Jewel",
+            "ilvl": 84,
+            "enchantMods": [
+                "Adds 8 Passive Skills",
+                "Added Small Passive Skills grant: 12% increased Minion Damage",
+            ],
+            "explicitMods": ["1 Added Passive Skill is Renewal"],
+            "implicitMods": [],
+        }
+    ).to_json()
+    silver_df = pd.DataFrame(
+        [
+            {
+                "event_key": "event-1",
+                "league": "Mirage",
+                "snapshot_date": "2026-05-15",
+                "raw_item_json": raw_item,
+                "price_chaos": 90.0,
+                "source": "trade_bucket",
+                "source_count": 1,
+                "seen_count": 1,
+                "first_seen_at": "2026-05-15T10:00:00Z",
+                "last_seen_at": "2026-05-15T10:00:00Z",
+                "listing_age_seconds": 30.0,
+                "freshness_band": "fresh",
+                "query_context": "{}",
+            },
+            {
+                "event_key": "event-1",
+                "league": "Mirage",
+                "snapshot_date": "2026-05-15",
+                "raw_item_json": raw_item,
+                "price_chaos": 90.0,
+                "source": "trade_bucket",
+                "source_count": 1,
+                "seen_count": 1,
+                "first_seen_at": "2026-05-15T10:00:00Z",
+                "last_seen_at": "2026-05-15T10:00:00Z",
+                "listing_age_seconds": 30.0,
+                "freshness_band": "fresh",
+                "query_context": "{}",
+            },
+        ]
+    )
+
+    gold_df = build_gold_dataframe(silver_df)
+
+    assert len(gold_df) == 1
+    assert gold_df.iloc[0]["cluster_size"] == "large"
+    assert gold_df.iloc[0]["cluster_passives"] == 8
+    assert gold_df.iloc[0]["notables"] == ["Renewal"]
+
+
 def test_snapshot_contract_reconciles_sources_and_carries_freshness(tmp_path) -> None:
     db_path = tmp_path / "firehose.db"
     conn = sqlite3.connect(db_path)
