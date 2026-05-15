@@ -7,6 +7,7 @@ import json
 from scripts.build_training_snapshot import (
     _enrich_bronze_observations,
     _stable_event_key,
+    _write_partitioned_parquet,
     build_bronze_dataframe,
     build_gold_dataframe,
     build_silver_dataframe,
@@ -308,6 +309,44 @@ def test_build_gold_dataframe_dedupes_rows_with_list_evidence() -> None:
     assert gold_df.iloc[0]["cluster_size"] == "large"
     assert gold_df.iloc[0]["cluster_passives"] == 8
     assert gold_df.iloc[0]["notables"] == ["Renewal"]
+
+
+def test_write_partitioned_parquet_reads_list_evidence_across_families(tmp_path) -> None:
+    gold_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-05-15",
+                "league": "Mirage",
+                "item_family": "jewel_cluster",
+                "item_id": "cluster-1",
+                "notables": ["Renewal"],
+                "mod_tokens": ["ClusterPassive"],
+                "tag_tokens": ["jewel"],
+            },
+            {
+                "snapshot_date": "2026-05-15",
+                "league": "Mirage",
+                "item_family": "wand_caster",
+                "item_id": "wand-1",
+                "notables": None,
+                "mod_tokens": None,
+                "tag_tokens": None,
+            },
+        ]
+    )
+    gold_dir = tmp_path / "gold"
+
+    _write_partitioned_parquet(
+        gold_df,
+        gold_dir,
+        partition_cols=("snapshot_date", "league", "item_family"),
+    )
+
+    restored = pd.read_parquet(gold_dir)
+
+    assert set(restored["item_id"]) == {"cluster-1", "wand-1"}
+    cluster_row = restored.loc[restored["item_id"] == "cluster-1"].iloc[0]
+    assert cluster_row["notables"] == '["Renewal"]'
 
 
 def test_snapshot_contract_reconciles_sources_and_carries_freshness(tmp_path) -> None:

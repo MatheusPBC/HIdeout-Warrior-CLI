@@ -54,6 +54,22 @@ def _make_hashable(value: Any) -> Any:
     return value
 
 
+def _serialize_parquet_value(value: Any) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    if isinstance(value, (list, tuple, dict)):
+        return json.dumps(value, ensure_ascii=True)
+    return str(value)
+
+
+def _prepare_parquet_payload(frame: pd.DataFrame) -> pd.DataFrame:
+    payload = frame.copy()
+    for column in payload.columns:
+        if payload[column].dtype == "object":
+            payload[column] = payload[column].map(_serialize_parquet_value)
+    return payload
+
+
 def _stable_event_key(row: Dict[str, Any], normalized_raw_json: str) -> str:
     candidate = "|".join(
         [
@@ -343,7 +359,9 @@ def _write_partitioned_parquet(
 
         partition_path.mkdir(parents=True, exist_ok=True)
         output_file = partition_path / f"part-{uuid4().hex}.parquet"
-        payload = partition_df.drop(columns=list(partition_cols), errors="ignore")
+        payload = _prepare_parquet_payload(
+            partition_df.drop(columns=list(partition_cols), errors="ignore")
+        )
         try:
             payload.to_parquet(output_file, index=False)
         except ImportError as exc:
