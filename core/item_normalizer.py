@@ -9,6 +9,7 @@ ITEM_FAMILIES = (
     "wand_caster",
     "body_armour_defense",
     "jewel_cluster",
+    "jewel_regular",
     "accessory_generic",
     "map",
     "gem",
@@ -20,6 +21,7 @@ LOW_ILVL_THRESHOLDS = {
     "wand_caster": 82,
     "body_armour_defense": 84,
     "jewel_cluster": 84,
+    "jewel_regular": 84,
     "accessory_generic": 82,
     "map": 1,
     "gem": 1,
@@ -31,6 +33,7 @@ HIGH_TIER_MIN_ILVL_THRESHOLDS = {
     "wand_caster": 82,
     "body_armour_defense": 84,
     "jewel_cluster": 84,
+    "jewel_regular": 84,
     "accessory_generic": 80,
     "map": 1,
     "gem": 1,
@@ -396,8 +399,10 @@ def classify_item_family(base_type: str, tag_tokens: Iterable[str]) -> str:
         return "flask"
     if "wand" in base_lower or {"wand", "caster"}.issubset(tags):
         return "wand_caster"
-    if "jewel" in base_lower:
+    if "cluster jewel" in base_lower:
         return "jewel_cluster"
+    if "jewel" in base_lower:
+        return "jewel_regular"
     if any(token in base_lower for token in ("ring", "amulet", "belt")):
         return "accessory_generic"
     if any(token in base_lower for token in ("armour", "garb", "regalia")):
@@ -451,6 +456,14 @@ def _clean_cluster_enchant(raw_enchant: str) -> str:
 
 def _extract_cluster_jewel_evidence(item_data: Dict[str, Any]) -> Dict[str, Any]:
     base_type = str(item_data.get("baseType") or "").lower()
+    if "cluster jewel" not in base_type:
+        return {
+            "cluster_size": "",
+            "cluster_passives": None,
+            "cluster_enchant": "",
+            "notables": [],
+        }
+
     cluster_size = ""
     for candidate in ("large", "medium", "small"):
         if candidate in base_type:
@@ -476,7 +489,9 @@ def _extract_cluster_jewel_evidence(item_data: Dict[str, Any]) -> Dict[str, Any]
             re.IGNORECASE,
         )
         if notable_match:
-            notables.append(notable_match.group(1).strip())
+            notable = notable_match.group(1).strip()
+            if notable.lower() != "a jewel socket":
+                notables.append(notable)
 
     return {
         "cluster_size": cluster_size,

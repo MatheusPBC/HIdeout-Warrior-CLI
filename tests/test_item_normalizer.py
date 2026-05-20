@@ -55,6 +55,7 @@ def test_classify_item_family_prefers_accessory_and_jewel_groups():
         == "accessory_generic"
     )
     assert classify_item_family("Large Cluster Jewel", ["jewel"]) == "jewel_cluster"
+    assert classify_item_family("Cobalt Jewel", ["jewel"]) == "jewel_regular"
 
 
 def test_classify_item_family_splits_market_commodity_noise():
@@ -101,6 +102,77 @@ def test_normalize_trade_item_extracts_cluster_jewel_evidence():
     assert normalized.cluster_passives == 8
     assert normalized.cluster_enchant == "Minion Damage"
     assert normalized.notables == ["Renewal", "Feasting Fiends"]
+
+
+def test_normalize_trade_item_keeps_regular_jewels_out_of_cluster_evidence():
+    raw = {
+        "listing": {
+            "whisper": "@seller hi",
+            "indexed": "2026-05-14T10:00:00Z",
+            "account": {"name": "seller"},
+            "price": {"amount": 90.0, "currency": "chaos"},
+        },
+        "item": {
+            "id": "jewel-1",
+            "baseType": "Cobalt Jewel",
+            "ilvl": 84,
+            "enchantMods": [],
+            "explicitMods": ["+#% increased Maximum Life"],
+            "implicitMods": [],
+        },
+    }
+
+    normalized = normalize_trade_item(
+        raw,
+        listed_price=90.0,
+        listing_currency="chaos",
+        listing_amount=90.0,
+    )
+
+    assert normalized is not None
+    assert normalized.item_family == "jewel_regular"
+    assert normalized.cluster_size == ""
+    assert normalized.cluster_passives is None
+    assert normalized.cluster_enchant == ""
+    assert normalized.notables == []
+
+
+def test_normalize_trade_item_cleans_multiline_cluster_enchant_and_socket_noise():
+    raw = {
+        "listing": {
+            "whisper": "@seller hi",
+            "indexed": "2026-05-14T10:00:00Z",
+            "account": {"name": "seller"},
+            "price": {"amount": 90.0, "currency": "chaos"},
+        },
+        "item": {
+            "id": "cluster-2",
+            "baseType": "Medium Cluster Jewel",
+            "ilvl": 84,
+            "enchantMods": [
+                "Life Recovery from Flasks\nAdded Small Passive Skills grant: 10% increased Mana Recovery from Flasks",
+                "Adds 4 Passive Skills",
+            ],
+            "explicitMods": [
+                "1 Added Passive Skill is a Jewel Socket",
+                "1 Added Passive Skill is Spiked Concoction",
+            ],
+            "implicitMods": [],
+        },
+    }
+
+    normalized = normalize_trade_item(
+        raw,
+        listed_price=90.0,
+        listing_currency="chaos",
+        listing_amount=90.0,
+    )
+
+    assert normalized is not None
+    assert normalized.cluster_size == "medium"
+    assert normalized.cluster_passives == 4
+    assert normalized.cluster_enchant == "Mana Recovery from Flasks"
+    assert normalized.notables == ["Spiked Concoction"]
 
 
 def test_normalize_trade_item_extracts_native_tier_metadata():

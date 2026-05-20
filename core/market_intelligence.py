@@ -11,6 +11,7 @@ BALANCED_WEIGHTS = {
     "margin_score": 0.20,
     "trend_score": 0.15,
 }
+EXCLUDED_MARKET_FAMILIES = {"map", "gem", "flask"}
 
 GOLD_MOD_FEATURES = (
     ("has_life", "Life"),
@@ -118,6 +119,13 @@ def build_market_segments(frame: pd.DataFrame) -> list[MarketSegmentAnalysis]:
         return []
 
     working = frame.copy()
+    if "item_family" in working.columns:
+        working = working[
+            ~working["item_family"].astype(str).isin(EXCLUDED_MARKET_FAMILIES)
+        ]
+    if working.empty:
+        return []
+
     working["segment_key"] = working.apply(lambda row: build_segment_key(row.to_dict()), axis=1)
 
     analyses = []

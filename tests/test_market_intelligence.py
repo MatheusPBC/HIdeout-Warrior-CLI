@@ -225,6 +225,47 @@ def test_build_market_segments_includes_evaluation_opportunities() -> None:
     assert segment.opportunities[0].estimated_upside == 0.375
 
 
+def test_build_market_segments_excludes_commodity_families() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "item_id": "map-1",
+                "league": "Mirage",
+                "item_family": "map",
+                "base_type": "Map (Tier 16)",
+                "ilvl_band": "high",
+                "price_chaos": 1.0,
+                "freshness_band": "fresh",
+            },
+            {
+                "item_id": "flask-1",
+                "league": "Mirage",
+                "item_family": "flask",
+                "base_type": "Basalt Flask",
+                "ilvl_band": "high",
+                "price_chaos": 2.0,
+                "freshness_band": "fresh",
+            },
+            {
+                "item_id": "wand-1",
+                "league": "Mirage",
+                "item_family": "wand_caster",
+                "base_type": "Imbued Wand",
+                "ilvl_band": "high",
+                "price_chaos": 80.0,
+                "tag_tokens": ["caster"],
+                "mod_tokens": ["SpellDamage"],
+                "freshness_band": "fresh",
+            },
+        ]
+    )
+
+    segments = build_market_segments(frame)
+
+    assert len(segments) == 1
+    assert segments[0].segment.item_family == "wand_caster"
+
+
 def test_market_opportunities_preserve_family_evidence_fields() -> None:
     frame = pd.DataFrame(
         [
