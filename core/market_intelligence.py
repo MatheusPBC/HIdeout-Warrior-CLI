@@ -11,7 +11,7 @@ BALANCED_WEIGHTS = {
     "margin_score": 0.20,
     "trend_score": 0.15,
 }
-EXCLUDED_MARKET_FAMILIES = {"map", "gem", "flask"}
+EXCLUDED_MARKET_FAMILIES = {"map", "gem", "flask", "market_misc"}
 
 GOLD_MOD_FEATURES = (
     ("has_life", "Life"),

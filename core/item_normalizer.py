@@ -14,6 +14,7 @@ ITEM_FAMILIES = (
     "map",
     "gem",
     "flask",
+    "market_misc",
     "generic",
 )
 
@@ -26,6 +27,7 @@ LOW_ILVL_THRESHOLDS = {
     "map": 1,
     "gem": 1,
     "flask": 1,
+    "market_misc": 1,
     "generic": 80,
 }
 
@@ -38,6 +40,7 @@ HIGH_TIER_MIN_ILVL_THRESHOLDS = {
     "map": 1,
     "gem": 1,
     "flask": 1,
+    "market_misc": 1,
     "generic": 78,
 }
 
@@ -397,6 +400,8 @@ def classify_item_family(base_type: str, tag_tokens: Iterable[str]) -> str:
         return "gem"
     if "flask" in base_lower:
         return "flask"
+    if any(token in base_lower for token in ("forbidden tome", "inscribed ultimatum", "wombgift")):
+        return "market_misc"
     if "wand" in base_lower or {"wand", "caster"}.issubset(tags):
         return "wand_caster"
     if "cluster jewel" in base_lower:

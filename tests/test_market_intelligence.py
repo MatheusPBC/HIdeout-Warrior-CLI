@@ -247,6 +247,15 @@ def test_build_market_segments_excludes_commodity_families() -> None:
                 "freshness_band": "fresh",
             },
             {
+                "item_id": "misc-1",
+                "league": "Mirage",
+                "item_family": "market_misc",
+                "base_type": "Forbidden Tome",
+                "ilvl_band": "unknown",
+                "price_chaos": 40.0,
+                "freshness_band": "fresh",
+            },
+            {
                 "item_id": "wand-1",
                 "league": "Mirage",
                 "item_family": "wand_caster",

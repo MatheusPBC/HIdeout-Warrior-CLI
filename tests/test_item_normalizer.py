@@ -64,6 +64,9 @@ def test_classify_item_family_splits_market_commodity_noise():
     assert classify_item_family("Empower Support", []) == "gem"
     assert classify_item_family("Quicksilver Flask", []) == "flask"
     assert classify_item_family("Basalt Flask", []) == "flask"
+    assert classify_item_family("Forbidden Tome", []) == "market_misc"
+    assert classify_item_family("Inscribed Ultimatum", []) == "market_misc"
+    assert classify_item_family("Provisioning Wombgift", []) == "market_misc"
 
 
 def test_normalize_trade_item_extracts_cluster_jewel_evidence():
